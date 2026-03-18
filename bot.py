@@ -1,12 +1,11 @@
 """
 ARTPOL Агент-Сметчик — Telegram-бот
-Этап 1: парсер текста замерщика
+Этап 1: парсер текста замерщика + PostgreSQL
 
-Менеджер отправляет текст → AI парсит → показывает результат с кнопками.
+Менеджер отправляет текст → AI парсит → сохраняет в БД → показывает результат с кнопками.
 """
 
 import os
-import json
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -15,6 +14,7 @@ from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
 from parser import process_measurement
+from database import init_db, save_measurement, update_measurement_status, close_db
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -33,16 +33,32 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище последнего распознанного замера (в памяти, потом — БД)
-# user_id -> parsed_data
+# user_id -> {"parsed": dict, "db_id": int, "created_at": datetime}
 user_measurements = {}
 
 
 # ---------- Форматирование результата ----------
 
-def format_parsed_result(data: dict) -> str:
+def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
     """Форматирует распознанные данные для менеджера."""
-    lines = ["📋 <b>Распознанные данные замера:</b>", ""]
+    lines = []
+
+    # Шапка с номером и датой
+    if db_id and created_at:
+        date_str = created_at.strftime("%d.%m.%Y %H:%M")
+        lines.append(f"📋 <b>Замер #{db_id}</b> от {date_str}")
+    else:
+        lines.append("📋 <b>Распознанные данные замера:</b>")
+    lines.append("")
+
+    # Клиент
+    if data.get("client_name") or data.get("client_phone"):
+        client_parts = []
+        if data.get("client_name"):
+            client_parts.append(data["client_name"])
+        if data.get("client_phone"):
+            client_parts.append(data["client_phone"])
+        lines.append(f"👤 Клиент: {' | '.join(client_parts)}")
 
     if data.get("object_type"):
         lines.append(f"🏠 Тип: {data['object_type']}")
@@ -71,7 +87,7 @@ def format_parsed_result(data: dict) -> str:
         lines.append(f"⏰ Сроки: {data['deadline']}")
     if data.get("special_conditions"):
         lines.append(f"⚠️ Особые условия: {', '.join(data['special_conditions'])}")
-    if data.get("distance") and not data["distance"].get("error"):
+    if data.get("distance") and isinstance(data["distance"], dict) and not data["distance"].get("error"):
         d = data["distance"]
         lines.append(f"🚛 От базы: {d['distance_km']} км (~{d['duration_min']} мин)")
 
@@ -111,14 +127,15 @@ async def cmd_start(message: Message):
         "Можно:\n"
         "• Написать своими словами\n"
         "• Переслать сообщение замерщика\n\n"
-        "Пример: <i>Квартира 78м², ЖК Анкудиновский, слой 50мм, тёплый пол</i>",
+        "Пример: <i>Алексей +79001234567, квартира 78м², "
+        "ЖК Анкудиновский, слой 50мм, тёплый пол</i>",
         parse_mode=ParseMode.HTML,
     )
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_measurement_text(message: Message):
-    """Менеджер отправил текст → парсим через AI."""
+    """Менеджер отправил текст → парсим через AI → сохраняем в БД."""
     user_id = message.from_user.id
 
     # Показываем что работаем
@@ -135,11 +152,27 @@ async def handle_measurement_text(message: Message):
             )
             return
 
-        # Сохраняем результат
-        user_measurements[user_id] = result
+        # Сохраняем в БД
+        manager_name = message.from_user.full_name or "unknown"
+        db_result = await save_measurement(
+            manager_tg_id=user_id,
+            manager_name=manager_name,
+            raw_text=message.text,
+            parsed=result,
+        )
+
+        db_id = db_result["id"]
+        created_at = db_result["created_at"]
+
+        # Сохраняем в памяти для кнопок
+        user_measurements[user_id] = {
+            "parsed": result,
+            "db_id": db_id,
+            "created_at": created_at,
+        }
 
         # Показываем результат с кнопками
-        text = format_parsed_result(result)
+        text = format_parsed_result(result, db_id=db_id, created_at=created_at)
         has_missing = bool(result.get("missing_fields"))
         keyboard = get_result_keyboard(has_missing)
 
@@ -160,15 +193,18 @@ async def handle_measurement_text(message: Message):
 async def on_confirm(callback: CallbackQuery):
     """Менеджер подтвердил данные."""
     user_id = callback.from_user.id
-    data = user_measurements.get(user_id)
+    entry = user_measurements.get(user_id)
 
-    if not data:
+    if not entry:
         await callback.answer("Данные не найдены. Отправь замер заново.")
         return
 
+    # Обновляем статус в БД
+    await update_measurement_status(entry["db_id"], "confirmed")
+
     # TODO: Здесь будет вызов калькулятора → генерация КП
     await callback.message.edit_text(
-        format_parsed_result(data)
+        format_parsed_result(entry["parsed"], db_id=entry["db_id"], created_at=entry["created_at"])
         + "\n\n✅ <b>Данные подтверждены!</b>"
         + "\n\n🚧 <i>Следующий шаг: калькулятор → КП (в разработке)</i>",
         parse_mode=ParseMode.HTML,
@@ -190,13 +226,13 @@ async def on_retry(callback: CallbackQuery):
 async def on_fill_missing(callback: CallbackQuery):
     """Менеджер хочет дополнить недостающие данные."""
     user_id = callback.from_user.id
-    data = user_measurements.get(user_id)
+    entry = user_measurements.get(user_id)
 
-    if not data or not data.get("missing_fields"):
+    if not entry or not entry["parsed"].get("missing_fields"):
         await callback.answer("Нет недостающих полей.")
         return
 
-    missing = data["missing_fields"]
+    missing = entry["parsed"]["missing_fields"]
     # TODO: пошаговый сбор недостающих полей через FSM
     await callback.message.answer(
         "📝 <b>Допиши недостающие данные одним сообщением:</b>\n"
@@ -209,8 +245,14 @@ async def on_fill_missing(callback: CallbackQuery):
 # ---------- Запуск ----------
 
 async def main():
+    # Инициализируем БД
+    await init_db()
+
     logger.info("Бот ARTPOL Агент-Сметчик запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await close_db()
 
 
 if __name__ == "__main__":

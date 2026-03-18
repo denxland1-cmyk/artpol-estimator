@@ -35,6 +35,8 @@ PARSER_SYSTEM_PROMPT = """\
 
 Формат ответа:
 {
+  "client_name": "строка" или null,
+  "client_phone": "строка" или null,
   "zones": [{"name": "строка", "area_m2": число, "thickness_mm": число}, ...],
   "object_type": "квартира" | "дом" | "коммерция" | null,
   "location_type": "город" | "за городом" | null,
@@ -46,6 +48,8 @@ PARSER_SYSTEM_PROMPT = """\
 }
 
 Правила:
+- client_name: имя клиента/заказчика если упомянуто в тексте (например "Алексей", "Иванов Пётр")
+- client_phone: номер телефона если указан (сохрани как есть, с +7 или 8)
 - zones: массив зон объекта. Каждая зона — это часть объекта со своей площадью и толщиной слоя.
   Если в тексте одна зона (например "78м², слой 50мм") — верни одну зону: [{"name": "объект", "area_m2": 78, "thickness_mm": 50}].
   Если несколько зон с разной толщиной (например "1 этаж 111.7м2 на 95мм, 2 этаж 92.1м2 на 85мм") — верни каждую отдельно.
@@ -184,6 +188,10 @@ async def process_measurement(text: str) -> dict:
 
     # --- Определяем недостающие обязательные поля ---
     missing = []
+    if not parsed.get("client_name"):
+        missing.append("имя клиента")
+    if not parsed.get("client_phone"):
+        missing.append("телефон клиента")
     if not parsed.get("area_m2"):
         missing.append("площадь (м²)")
     if parsed.get("thickness_mm_avg") is None:
