@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-YANDEX_ROUTES_API_KEY = os.environ.get("YANDEX_ROUTES_API_KEY")
 
 # Координаты базы: Нижний Новгород, Интернациональная, 100
 BASE_LAT = 56.310043
@@ -101,48 +100,44 @@ async def parse_measurement_text(text: str) -> dict:
         return {"error": "api_failed", "detail": str(e)}
 
 
-# ---------- Яндекс Routes API ----------
+# ---------- OSRM — расстояние по дороге (бесплатно) ----------
 
 
 async def get_distance_km(lat: float, lon: float) -> dict:
     """
     Считает расстояние по дороге от базы до объекта.
-    Использует Yandex Routes API (driving).
+    OSRM (Open Source Routing Machine) — бесплатный, без ключа.
+    Docs: https://project-osrm.org/docs/v5.24.0/api/
+    ВАЖНО: OSRM принимает координаты как lon,lat (не lat,lon!)
     Возвращает {"distance_km": число, "duration_min": число} или {"error": ...}
     """
-    url = "https://routes.api.yandex.net/v2/route"
+    # OSRM формат: /route/v1/driving/lon1,lat1;lon2,lat2
+    url = (
+        f"https://router.project-osrm.org/route/v1/driving/"
+        f"{BASE_LON},{BASE_LAT};{lon},{lat}"
+    )
 
-    headers = {
-        "Authorization": f"Bearer {YANDEX_ROUTES_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    body = {
-        "source": {"point": {"latitude": BASE_LAT, "longitude": BASE_LON}},
-        "destination": {"point": {"latitude": lat, "longitude": lon}},
-        "routing_mode": "DRIVING",
-    }
+    params = {"overview": "false"}
 
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            resp = await http.post(url, json=body, headers=headers)
+            resp = await http.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
 
-        # Извлекаем дистанцию и время
-        route = data.get("route", {})
-        distance_m = route.get("distanceMeters", 0)
-        duration_s = route.get("durationSeconds", 0)
+        if data.get("code") != "Ok":
+            return {"error": "routes_failed", "detail": data.get("message", "unknown")}
 
+        route = data["routes"][0]
         result = {
-            "distance_km": round(distance_m / 1000, 1),
-            "duration_min": round(duration_s / 60),
+            "distance_km": round(route["distance"] / 1000, 1),
+            "duration_min": round(route["duration"] / 60),
         }
         logger.info("Расстояние: %s км, время: %s мин", result["distance_km"], result["duration_min"])
         return result
 
     except Exception as e:
-        logger.error("Ошибка Yandex Routes API: %s", e)
+        logger.error("Ошибка OSRM API: %s", e)
         return {"error": "routes_failed", "detail": str(e)}
 
 
