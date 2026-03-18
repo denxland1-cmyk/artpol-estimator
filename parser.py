@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-YANDEX_ROUTES_API_KEY = os.environ["YANDEX_ROUTES_API_KEY"]
+YANDEX_ROUTES_API_KEY = os.environ.get("YANDEX_ROUTES_API_KEY")
 
 # Координаты базы: Нижний Новгород, Интернациональная, 100
 BASE_LAT = 56.310043
