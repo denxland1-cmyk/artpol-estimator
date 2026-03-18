@@ -74,6 +74,9 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
             lines.append(f"📏 Толщина слоя: {data['thickness_mm_avg']} мм")
     if data.get("location_type"):
         lines.append(f"📍 Локация: {data['location_type']}")
+    if data.get("distance") and isinstance(data["distance"], dict) and not data["distance"].get("error"):
+        d = data["distance"]
+        lines.append(f"🚛 От базы: {d['distance_km']} км (~{d['duration_min']} мин)")
     if data.get("address"):
         lines.append(f"🏘 Адрес: {data['address']}")
     if data.get("coordinates"):
@@ -87,9 +90,6 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
         lines.append(f"⏰ Сроки: {data['deadline']}")
     if data.get("special_conditions"):
         lines.append(f"⚠️ Особые условия: {', '.join(data['special_conditions'])}")
-    if data.get("distance") and isinstance(data["distance"], dict) and not data["distance"].get("error"):
-        d = data["distance"]
-        lines.append(f"🚛 От базы: {d['distance_km']} км (~{d['duration_min']} мин)")
 
     if data.get("missing_fields"):
         lines.append("")
