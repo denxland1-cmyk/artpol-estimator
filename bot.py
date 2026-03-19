@@ -1,11 +1,12 @@
 """
 ARTPOL Агент-Сметчик — Telegram-бот
-Этап 1: парсер текста замерщика + PostgreSQL
+Парсер + PostgreSQL + Калькулятор сметы
 
-Менеджер отправляет текст → AI парсит → сохраняет в БД → показывает результат с кнопками.
+Менеджер отправляет текст → AI парсит → подтверждает → калькулятор считает смету.
 """
 
 import os
+import re
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -13,8 +14,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from parser import process_measurement
+from parser import process_measurement, get_distance_km
 from database import init_db, save_measurement, update_measurement_status, close_db
+from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -33,17 +35,51 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# user_id -> {"parsed": dict, "db_id": int, "created_at": datetime}
+# user_id -> {"parsed": dict, "db_id": int, "created_at": datetime, "grade": str, "estimate": dict}
 user_measurements = {}
 
 
-# ---------- Форматирование результата ----------
+# ---------- Вспомогательные ----------
+
+def extract_floor(parsed: dict) -> int:
+    """Извлекает этаж: сначала из поля floor, потом из текста."""
+    # Поле floor от парсера (приоритет)
+    if parsed.get("floor") and isinstance(parsed["floor"], (int, float)):
+        return int(parsed["floor"])
+    # Fallback: ищем в особых условиях
+    for cond in parsed.get("special_conditions", []):
+        m = re.search(r"(\d+)\s*этаж", cond, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return 1  # по умолчанию 1 этаж
+
+
+async def get_materials_distance(lat: float, lon: float) -> float:
+    """Расстояние от базы материалов (Окская Гавань) до объекта."""
+    # Временно подменяем координаты базы для OSRM запроса
+    import httpx
+    url = (
+        f"https://router.project-osrm.org/route/v1/driving/"
+        f"{MATERIALS_BASE_LON},{MATERIALS_BASE_LAT};{lon},{lat}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(url, params={"overview": "false"})
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("code") == "Ok":
+            return round(data["routes"][0]["distance"] / 1000, 1)
+    except Exception as e:
+        logger.error("Ошибка OSRM (материалы): %s", e)
+    return 0
+
+
+# ---------- Форматирование ----------
 
 def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
     """Форматирует распознанные данные для менеджера."""
     lines = []
 
-    # Шапка с номером и датой
     if db_id and created_at:
         date_str = created_at.strftime("%d.%m.%Y %H:%M")
         lines.append(f"📋 <b>Замер #{db_id}</b> от {date_str}")
@@ -51,7 +87,6 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
         lines.append("📋 <b>Распознанные данные замера:</b>")
     lines.append("")
 
-    # Клиент
     if data.get("client_name") or data.get("client_phone"):
         client_parts = []
         if data.get("client_name"):
@@ -74,6 +109,8 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
             lines.append(f"📏 Толщина слоя: {data['thickness_mm_avg']} мм")
     if data.get("location_type"):
         lines.append(f"📍 Локация: {data['location_type']}")
+    if data.get("floor"):
+        lines.append(f"🏢 Этаж: {data['floor']}")
     if data.get("distance") and isinstance(data["distance"], dict) and not data["distance"].get("error"):
         d = data["distance"]
         lines.append(f"🚛 От базы: {d['distance_km']} км (~{d['duration_min']} мин)")
@@ -101,20 +138,29 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
 
 
 def get_result_keyboard(has_missing: bool) -> InlineKeyboardMarkup:
-    """Inline-кнопки после распознавания."""
     buttons = []
-
     if has_missing:
         buttons.append([
             InlineKeyboardButton(text="📝 Дополнить данные", callback_data="fill_missing")
         ])
-
     buttons.append([
-        InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm"),
+        InlineKeyboardButton(text="✅ Всё верно → Смета", callback_data="confirm"),
         InlineKeyboardButton(text="🔄 Ввести заново", callback_data="retry"),
     ])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_estimate_keyboard(current_grade: str) -> InlineKeyboardMarkup:
+    """Кнопки после расчёта сметы — переключение М150/М200."""
+    if current_grade == "М150":
+        grade_btn = InlineKeyboardButton(text="🔴 Пересчитать М200", callback_data="grade_m200")
+    else:
+        grade_btn = InlineKeyboardButton(text="🟢 Пересчитать М150", callback_data="grade_m150")
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [grade_btn],
+        [InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")],
+    ])
 
 
 # ---------- Хендлеры ----------
@@ -123,7 +169,7 @@ def get_result_keyboard(has_missing: bool) -> InlineKeyboardMarkup:
 async def cmd_start(message: Message):
     await message.answer(
         "👷 <b>ARTPOL Агент-Сметчик</b>\n\n"
-        "Отправь мне текст замера — я распознаю параметры.\n\n"
+        "Отправь мне текст замера — я распознаю параметры и посчитаю смету.\n\n"
         "Можно:\n"
         "• Написать своими словами\n"
         "• Переслать сообщение замерщика\n\n"
@@ -137,8 +183,6 @@ async def cmd_start(message: Message):
 async def handle_measurement_text(message: Message):
     """Менеджер отправил текст → парсим через AI → сохраняем в БД."""
     user_id = message.from_user.id
-
-    # Показываем что работаем
     processing_msg = await message.answer("⏳ Распознаю данные замера...")
 
     try:
@@ -152,7 +196,6 @@ async def handle_measurement_text(message: Message):
             )
             return
 
-        # Сохраняем в БД
         manager_name = message.from_user.full_name or "unknown"
         db_result = await save_measurement(
             manager_tg_id=user_id,
@@ -161,37 +204,27 @@ async def handle_measurement_text(message: Message):
             parsed=result,
         )
 
-        db_id = db_result["id"]
-        created_at = db_result["created_at"]
-
-        # Сохраняем в памяти для кнопок
         user_measurements[user_id] = {
             "parsed": result,
-            "db_id": db_id,
-            "created_at": created_at,
+            "db_id": db_result["id"],
+            "created_at": db_result["created_at"],
+            "grade": "М150",
         }
 
-        # Показываем результат с кнопками
-        text = format_parsed_result(result, db_id=db_id, created_at=created_at)
+        text = format_parsed_result(result, db_id=db_result["id"], created_at=db_result["created_at"])
         has_missing = bool(result.get("missing_fields"))
         keyboard = get_result_keyboard(has_missing)
 
-        await processing_msg.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
+        await processing_msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     except Exception as e:
         logger.error("Ошибка обработки: %s", e, exc_info=True)
-        await processing_msg.edit_text(
-            "❌ Что-то пошло не так. Попробуй ещё раз.",
-        )
+        await processing_msg.edit_text("❌ Что-то пошло не так. Попробуй ещё раз.")
 
 
 @dp.callback_query(F.data == "confirm")
 async def on_confirm(callback: CallbackQuery):
-    """Менеджер подтвердил данные."""
+    """Менеджер подтвердил → считаем смету."""
     user_id = callback.from_user.id
     entry = user_measurements.get(user_id)
 
@@ -199,32 +232,110 @@ async def on_confirm(callback: CallbackQuery):
         await callback.answer("Данные не найдены. Отправь замер заново.")
         return
 
-    # Обновляем статус в БД
     await update_measurement_status(entry["db_id"], "confirmed")
 
-    # TODO: Здесь будет вызов калькулятора → генерация КП
-    await callback.message.edit_text(
-        format_parsed_result(entry["parsed"], db_id=entry["db_id"], created_at=entry["created_at"])
-        + "\n\n✅ <b>Данные подтверждены!</b>"
-        + "\n\n🚧 <i>Следующий шаг: калькулятор → КП (в разработке)</i>",
-        parse_mode=ParseMode.HTML,
+    parsed = entry["parsed"]
+    grade = entry.get("grade", "М150")
+
+    area = parsed.get("area_m2") or 0
+    thickness = parsed.get("thickness_mm_avg") or 0
+    is_city = parsed.get("location_type") != "за городом"
+    floor = extract_floor(parsed)
+
+    # Расстояния для области
+    dist_equipment = 0
+    dist_materials = 0
+
+    if not is_city:
+        coords = parsed.get("coordinates")
+        if coords and coords.get("lat") and coords.get("lon"):
+            # Расстояние от базы оборудования (Интернациональная) — уже есть
+            dist_info = parsed.get("distance", {})
+            if isinstance(dist_info, dict) and dist_info.get("distance_km"):
+                dist_equipment = dist_info["distance_km"]
+
+            # Расстояние от базы материалов (Окская Гавань)
+            dist_materials = await get_materials_distance(coords["lat"], coords["lon"])
+
+    # Считаем смету
+    estimate = calculate_estimate(
+        area_m2=area,
+        thickness_mm=thickness,
+        is_city=is_city,
+        grade=grade,
+        floor=floor,
+        distance_materials_km=dist_materials,
+        distance_equipment_km=dist_equipment,
     )
-    await callback.answer("Принято!")
+
+    entry["estimate"] = estimate
+    entry["dist_materials"] = dist_materials
+    entry["dist_equipment"] = dist_equipment
+    entry["floor"] = floor
+
+    # Формируем сообщение
+    header = format_parsed_result(parsed, db_id=entry["db_id"], created_at=entry["created_at"])
+    estimate_text = format_estimate(estimate)
+
+    await callback.message.edit_text(
+        header + "\n\n" + estimate_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_estimate_keyboard(grade),
+    )
+    await callback.answer("Смета рассчитана!")
+
+
+@dp.callback_query(F.data.in_({"grade_m150", "grade_m200"}))
+async def on_change_grade(callback: CallbackQuery):
+    """Переключение М150/М200 — пересчёт сметы."""
+    user_id = callback.from_user.id
+    entry = user_measurements.get(user_id)
+
+    if not entry:
+        await callback.answer("Данные не найдены. Отправь замер заново.")
+        return
+
+    new_grade = "М200" if callback.data == "grade_m200" else "М150"
+    entry["grade"] = new_grade
+
+    parsed = entry["parsed"]
+    area = parsed.get("area_m2") or 0
+    thickness = parsed.get("thickness_mm_avg") or 0
+    is_city = parsed.get("location_type") != "за городом"
+
+    estimate = calculate_estimate(
+        area_m2=area,
+        thickness_mm=thickness,
+        is_city=is_city,
+        grade=new_grade,
+        floor=entry.get("floor", 1),
+        distance_materials_km=entry.get("dist_materials", 0),
+        distance_equipment_km=entry.get("dist_equipment", 0),
+    )
+
+    entry["estimate"] = estimate
+
+    header = format_parsed_result(parsed, db_id=entry["db_id"], created_at=entry["created_at"])
+    estimate_text = format_estimate(estimate)
+
+    await callback.message.edit_text(
+        header + "\n\n" + estimate_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_estimate_keyboard(new_grade),
+    )
+    await callback.answer(f"Пересчитано на {new_grade}")
 
 
 @dp.callback_query(F.data == "retry")
 async def on_retry(callback: CallbackQuery):
-    """Менеджер хочет ввести заново."""
     user_id = callback.from_user.id
     user_measurements.pop(user_id, None)
-
     await callback.message.edit_text("🔄 Отправь текст замера заново.")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "fill_missing")
 async def on_fill_missing(callback: CallbackQuery):
-    """Менеджер хочет дополнить недостающие данные."""
     user_id = callback.from_user.id
     entry = user_measurements.get(user_id)
 
@@ -233,7 +344,6 @@ async def on_fill_missing(callback: CallbackQuery):
         return
 
     missing = entry["parsed"]["missing_fields"]
-    # TODO: пошаговый сбор недостающих полей через FSM
     await callback.message.answer(
         "📝 <b>Допиши недостающие данные одним сообщением:</b>\n"
         + "\n".join(f"  • {f}" for f in missing),
@@ -245,9 +355,7 @@ async def on_fill_missing(callback: CallbackQuery):
 # ---------- Запуск ----------
 
 async def main():
-    # Инициализируем БД
     await init_db()
-
     logger.info("Бот ARTPOL Агент-Сметчик запущен")
     try:
         await dp.start_polling(bot)
