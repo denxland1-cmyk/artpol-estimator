@@ -103,6 +103,9 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
                 lines.append(f"    ↳ {z['name']}: {z.get('area_m2', '?')} м² × {z.get('thickness_mm', '?')} мм")
         else:
             lines.append(f"📏 Толщина слоя: {data['thickness_mm_avg']} мм")
+    if data.get("keramzit"):
+        k = data["keramzit"]
+        lines.append(f"🟤 Керамзит: {k.get('area_m2', '?')} м², слой {k.get('thickness_mm', '?')} мм")
     if data.get("location_type"):
         lines.append(f"📍 Локация: {data['location_type']}")
     if data.get("floor"):
@@ -119,9 +122,6 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
         lines.append("🔥 Тёплый пол: да")
     elif data.get("warm_floor") is False:
         lines.append("❄️ Тёплый пол: нет")
-    if data.get("keramzit"):
-        k = data["keramzit"]
-        lines.append(f"🟤 Керамзит: {k.get('area_m2', '?')} м², слой {k.get('thickness_mm', '?')} мм")
     if data.get("deadline"):
         lines.append(f"⏰ Сроки: {data['deadline']}")
     if data.get("special_conditions"):
