@@ -1,27 +1,28 @@
 """
 ARTPOL Агент-Сметчик — Telegram-бот
-Парсер + PostgreSQL + Калькулятор сметы
+Парсер + Калькулятор + КП генератор
 
-Менеджер отправляет текст → AI парсит → подтверждает → калькулятор считает смету.
+Менеджер: текст замера → подтверждение → смета → настройки → КП в .docx
 """
 
 import os
 import re
 import logging
 
+import httpx
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
 from parser import process_measurement, get_distance_km
 from database import init_db, save_measurement, update_measurement_status, close_db
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
+from kp_generator import generate_kp
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
 # НИКОГДА не вставляй значения прямо в код!
-# Railway Variables / .env + python-dotenv
 # ============================================================
 
 BOT_TOKEN = os.environ["ESTIMATOR_BOT_TOKEN"]
@@ -35,29 +36,26 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# user_id -> {"parsed": dict, "db_id": int, "created_at": datetime, "grade": str, "estimate": dict}
-user_measurements = {}
+# Состояние менеджера
+# user_id -> {parsed, db_id, created_at, grade, modifier, payment, sand_removal,
+#             estimate, dist_materials, dist_equipment, floor, keramzit_area, keramzit_thick,
+#             awaiting_custom_modifier}
+user_state = {}
 
 
-# ---------- Вспомогательные ----------
+# ========== Вспомогательные ==========
 
 def extract_floor(parsed: dict) -> int:
-    """Извлекает этаж: сначала из поля floor, потом из текста."""
-    # Поле floor от парсера (приоритет)
     if parsed.get("floor") and isinstance(parsed["floor"], (int, float)):
         return int(parsed["floor"])
-    # Fallback: ищем в особых условиях
     for cond in parsed.get("special_conditions", []):
         m = re.search(r"(\d+)\s*этаж", cond, re.IGNORECASE)
         if m:
             return int(m.group(1))
-    return 1  # по умолчанию 1 этаж
+    return 1
 
 
 async def get_materials_distance(lat: float, lon: float) -> float:
-    """Расстояние от базы материалов (Окская Гавань) до объекта."""
-    # Временно подменяем координаты базы для OSRM запроса
-    import httpx
     url = (
         f"https://router.project-osrm.org/route/v1/driving/"
         f"{MATERIALS_BASE_LON},{MATERIALS_BASE_LAT};{lon},{lat}"
@@ -74,12 +72,20 @@ async def get_materials_distance(lat: float, lon: float) -> float:
     return 0
 
 
-# ---------- Форматирование ----------
+def calc_client_price(base: int, modifier: float, sand_removal: bool) -> int:
+    """Считает цену клиенту от базы + модификатор + вывоз песка."""
+    total = base
+    if sand_removal:
+        total += 5000
+    if modifier != 0:
+        total = total * (1 + modifier / 100)
+    return round(total)
+
+
+# ========== Форматирование ==========
 
 def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
-    """Форматирует распознанные данные для менеджера."""
     lines = []
-
     if db_id and created_at:
         date_str = created_at.strftime("%d.%m.%Y %H:%M")
         lines.append(f"📋 <b>Замер #{db_id}</b> от {date_str}")
@@ -88,12 +94,12 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
     lines.append("")
 
     if data.get("client_name") or data.get("client_phone"):
-        client_parts = []
+        parts = []
         if data.get("client_name"):
-            client_parts.append(data["client_name"])
+            parts.append(data["client_name"])
         if data.get("client_phone"):
-            client_parts.append(data["client_phone"])
-        lines.append(f"👤 Клиент: {' | '.join(client_parts)}")
+            parts.append(data["client_phone"])
+        lines.append(f"👤 Клиент: {' | '.join(parts)}")
 
     if data.get("object_type"):
         lines.append(f"🏠 Тип: {data['object_type']}")
@@ -140,12 +146,37 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
     return "\n".join(lines)
 
 
-def get_result_keyboard(has_missing: bool) -> InlineKeyboardMarkup:
+def format_full_estimate(st: dict) -> str:
+    """Смета + цена клиенту."""
+    est = st["estimate"]
+    modifier = st.get("modifier", 0)
+    sand_removal = st.get("sand_removal", False)
+
+    lines = [format_estimate(est)]
+
+    base = est["grand_total"]
+    client_price = calc_client_price(base, modifier, sand_removal)
+
+    if modifier != 0 or sand_removal:
+        lines.append("")
+        parts = []
+        if sand_removal:
+            parts.append("вывоз песка +5,000₽")
+        if modifier < 0:
+            parts.append(f"скидка {modifier}%")
+        elif modifier > 0:
+            parts.append(f"наценка +{modifier}%")
+        lines.append(f"💰 <b>Цена клиенту ({', '.join(parts)}): {client_price:,}₽</b>")
+
+    return "\n".join(lines)
+
+
+# ========== Клавиатуры ==========
+
+def get_parse_keyboard(has_missing: bool) -> InlineKeyboardMarkup:
     buttons = []
     if has_missing:
-        buttons.append([
-            InlineKeyboardButton(text="📝 Дополнить данные", callback_data="fill_missing")
-        ])
+        buttons.append([InlineKeyboardButton(text="📝 Дополнить данные", callback_data="fill_missing")])
     buttons.append([
         InlineKeyboardButton(text="✅ Всё верно → Смета", callback_data="confirm"),
         InlineKeyboardButton(text="🔄 Ввести заново", callback_data="retry"),
@@ -153,20 +184,104 @@ def get_result_keyboard(has_missing: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def get_estimate_keyboard(current_grade: str) -> InlineKeyboardMarkup:
-    """Кнопки после расчёта сметы — переключение М150/М200."""
-    if current_grade == "М150":
-        grade_btn = InlineKeyboardButton(text="🔴 Пересчитать М200", callback_data="grade_m200")
-    else:
-        grade_btn = InlineKeyboardButton(text="🟢 Пересчитать М150", callback_data="grade_m150")
+def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
+    grade = st.get("grade", "М150")
+    modifier = st.get("modifier", 0)
+    payment = st.get("payment", "")
+    sand = st.get("sand_removal", False)
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [grade_btn],
-        [InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")],
+    rows = []
+
+    # М150 / М200
+    m150 = "🟢 М150 ✓" if grade == "М150" else "М150"
+    m200 = "🔴 М200 ✓" if grade == "М200" else "М200"
+    rows.append([
+        InlineKeyboardButton(text=m150, callback_data="grade_m150"),
+        InlineKeyboardButton(text=m200, callback_data="grade_m200"),
     ])
 
+    # Скидка
+    discounts = [(-1, "-1%"), (-3, "-3%"), (-5, "-5%")]
+    disc_btns = []
+    for val, label in discounts:
+        txt = f"🔴 {label} ✓" if modifier == val else label
+        disc_btns.append(InlineKeyboardButton(text=txt, callback_data=f"mod_{val}"))
+    disc_btns.append(InlineKeyboardButton(
+        text="🔴 Своя ✓" if (modifier < 0 and modifier not in [-1, -3, -5]) else "Своя",
+        callback_data="mod_custom_disc"
+    ))
+    rows.append(disc_btns)
 
-# ---------- Хендлеры ----------
+    # Наценка
+    markups = [(1, "+1%"), (3, "+3%"), (5, "+5%")]
+    mark_btns = []
+    for val, label in markups:
+        txt = f"🟢 {label} ✓" if modifier == val else label
+        mark_btns.append(InlineKeyboardButton(text=txt, callback_data=f"mod_{val}"))
+    mark_btns.append(InlineKeyboardButton(
+        text="🟢 Своя ✓" if (modifier > 0 and modifier not in [1, 3, 5]) else "Своя",
+        callback_data="mod_custom_mark"
+    ))
+    rows.append(mark_btns)
+
+    # Сброс если есть модификатор
+    if modifier != 0:
+        rows.append([InlineKeyboardButton(text="↩️ Сбросить скидку/наценку", callback_data="mod_0")])
+
+    # Нал / Безнал
+    cash_txt = "🟢 Нал ✓" if payment == "наличными" else "Нал"
+    bank_txt = "🟢 Безнал ✓" if payment == "безналичный расчет" else "Безнал"
+    rows.append([
+        InlineKeyboardButton(text=cash_txt, callback_data="pay_cash"),
+        InlineKeyboardButton(text=bank_txt, callback_data="pay_bank"),
+    ])
+
+    # Вывоз песка
+    sand_txt = "🟢 Вывоз песка: ДА (+5,000₽) ✓" if sand else "Вывоз песка: НЕТ"
+    rows.append([InlineKeyboardButton(text=sand_txt, callback_data="sand_toggle")])
+
+    # Сформировать КП — доступна только если выбран способ оплаты
+    if payment:
+        rows.append([InlineKeyboardButton(text="📄 Сформировать КП", callback_data="generate_kp")])
+
+    # Новый замер
+    rows.append([InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def recalc_and_show(callback: CallbackQuery, st: dict):
+    """Пересчитывает смету и обновляет сообщение."""
+    parsed = st["parsed"]
+    area = parsed.get("area_m2") or 0
+    thickness = parsed.get("thickness_mm_avg") or 0
+    is_city = parsed.get("location_type") != "за городом"
+
+    estimate = calculate_estimate(
+        area_m2=area,
+        thickness_mm=thickness,
+        is_city=is_city,
+        grade=st.get("grade", "М150"),
+        floor=st.get("floor", 1),
+        distance_materials_km=st.get("dist_materials", 0),
+        distance_equipment_km=st.get("dist_equipment", 0),
+        keramzit_area_m2=st.get("keramzit_area", 0),
+        keramzit_thickness_mm=st.get("keramzit_thick", 0),
+    )
+    st["estimate"] = estimate
+
+    header = format_parsed_result(parsed, db_id=st["db_id"], created_at=st["created_at"])
+    estimate_text = format_full_estimate(st)
+    keyboard = get_estimate_keyboard(st)
+
+    await callback.message.edit_text(
+        header + "\n\n" + estimate_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
+# ========== Хендлеры ==========
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -183,181 +298,291 @@ async def cmd_start(message: Message):
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
-async def handle_measurement_text(message: Message):
-    """Менеджер отправил текст → парсим через AI → сохраняем в БД."""
+async def handle_text(message: Message):
     user_id = message.from_user.id
+    st = user_state.get(user_id)
+
+    # Ждём ввод пользовательского % скидки/наценки?
+    if st and st.get("awaiting_custom_modifier"):
+        direction = st.pop("awaiting_custom_modifier")  # "disc" или "mark"
+        try:
+            val = float(message.text.replace(",", ".").replace("%", "").strip())
+            val = abs(val)
+            if direction == "disc":
+                st["modifier"] = -val
+            else:
+                st["modifier"] = val
+
+            # Пересчитываем — нужно отправить новое сообщение
+            parsed = st["parsed"]
+            area = parsed.get("area_m2") or 0
+            thickness = parsed.get("thickness_mm_avg") or 0
+            is_city = parsed.get("location_type") != "за городом"
+
+            estimate = calculate_estimate(
+                area_m2=area, thickness_mm=thickness, is_city=is_city,
+                grade=st.get("grade", "М150"), floor=st.get("floor", 1),
+                distance_materials_km=st.get("dist_materials", 0),
+                distance_equipment_km=st.get("dist_equipment", 0),
+                keramzit_area_m2=st.get("keramzit_area", 0),
+                keramzit_thickness_mm=st.get("keramzit_thick", 0),
+            )
+            st["estimate"] = estimate
+
+            header = format_parsed_result(parsed, db_id=st["db_id"], created_at=st["created_at"])
+            estimate_text = format_full_estimate(st)
+            keyboard = get_estimate_keyboard(st)
+
+            await message.answer(
+                header + "\n\n" + estimate_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+            return
+        except ValueError:
+            await message.answer("❌ Введи число (например: 7 или 12.5)")
+            st["awaiting_custom_modifier"] = direction
+            return
+
+    # Обычный замер
     processing_msg = await message.answer("⏳ Распознаю данные замера...")
 
     try:
         result = await process_measurement(message.text)
 
         if result.get("error"):
-            error_detail = result.get("detail", "неизвестная ошибка")
             await processing_msg.edit_text(
-                f"❌ Ошибка распознавания: {error_detail}\n\n"
-                "Попробуй отправить текст ещё раз.",
-            )
+                f"❌ Ошибка распознавания: {result.get('detail', '?')}\n\nПопробуй ещё раз.")
             return
 
         manager_name = message.from_user.full_name or "unknown"
         db_result = await save_measurement(
-            manager_tg_id=user_id,
-            manager_name=manager_name,
-            raw_text=message.text,
-            parsed=result,
+            manager_tg_id=user_id, manager_name=manager_name,
+            raw_text=message.text, parsed=result,
         )
 
-        user_measurements[user_id] = {
+        user_state[user_id] = {
             "parsed": result,
             "db_id": db_result["id"],
             "created_at": db_result["created_at"],
             "grade": "М150",
+            "modifier": 0,
+            "payment": "",
+            "sand_removal": False,
+            "estimate": None,
         }
 
         text = format_parsed_result(result, db_id=db_result["id"], created_at=db_result["created_at"])
         has_missing = bool(result.get("missing_fields"))
-        keyboard = get_result_keyboard(has_missing)
+        keyboard = get_parse_keyboard(has_missing)
 
         await processing_msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error("Ошибка обработки: %s", e, exc_info=True)
+        logger.error("Ошибка: %s", e, exc_info=True)
         await processing_msg.edit_text("❌ Что-то пошло не так. Попробуй ещё раз.")
 
 
 @dp.callback_query(F.data == "confirm")
 async def on_confirm(callback: CallbackQuery):
-    """Менеджер подтвердил → считаем смету."""
     user_id = callback.from_user.id
-    entry = user_measurements.get(user_id)
-
-    if not entry:
-        await callback.answer("Данные не найдены. Отправь замер заново.")
+    st = user_state.get(user_id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
         return
 
-    await update_measurement_status(entry["db_id"], "confirmed")
+    await update_measurement_status(st["db_id"], "confirmed")
 
-    parsed = entry["parsed"]
-    grade = entry.get("grade", "М150")
-
-    area = parsed.get("area_m2") or 0
-    thickness = parsed.get("thickness_mm_avg") or 0
+    parsed = st["parsed"]
     is_city = parsed.get("location_type") != "за городом"
-    floor = extract_floor(parsed)
+    st["floor"] = extract_floor(parsed)
 
-    # Расстояния для области
-    dist_equipment = 0
-    dist_materials = 0
-
+    # Расстояния
+    st["dist_equipment"] = 0
+    st["dist_materials"] = 0
     if not is_city:
         coords = parsed.get("coordinates")
         if coords and coords.get("lat") and coords.get("lon"):
-            # Расстояние от базы оборудования (Интернациональная) — уже есть
             dist_info = parsed.get("distance", {})
             if isinstance(dist_info, dict) and dist_info.get("distance_km"):
-                dist_equipment = dist_info["distance_km"]
-
-            # Расстояние от базы материалов (Окская Гавань)
-            dist_materials = await get_materials_distance(coords["lat"], coords["lon"])
+                st["dist_equipment"] = dist_info["distance_km"]
+            st["dist_materials"] = await get_materials_distance(coords["lat"], coords["lon"])
 
     # Керамзит
     keramzit_data = parsed.get("keramzit") or {}
-    ker_area = keramzit_data.get("area_m2", 0) or 0
-    ker_thick = keramzit_data.get("thickness_mm", 0) or 0
+    st["keramzit_area"] = keramzit_data.get("area_m2", 0) or 0
+    st["keramzit_thick"] = keramzit_data.get("thickness_mm", 0) or 0
 
-    # Считаем смету
-    estimate = calculate_estimate(
-        area_m2=area,
-        thickness_mm=thickness,
-        is_city=is_city,
-        grade=grade,
-        floor=floor,
-        distance_materials_km=dist_materials,
-        distance_equipment_km=dist_equipment,
-        keramzit_area_m2=ker_area,
-        keramzit_thickness_mm=ker_thick,
-    )
-
-    entry["estimate"] = estimate
-    entry["dist_materials"] = dist_materials
-    entry["dist_equipment"] = dist_equipment
-    entry["floor"] = floor
-    entry["keramzit_area"] = ker_area
-    entry["keramzit_thick"] = ker_thick
-
-    # Формируем сообщение
-    header = format_parsed_result(parsed, db_id=entry["db_id"], created_at=entry["created_at"])
-    estimate_text = format_estimate(estimate)
-
-    await callback.message.edit_text(
-        header + "\n\n" + estimate_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_estimate_keyboard(grade),
-    )
+    await recalc_and_show(callback, st)
     await callback.answer("Смета рассчитана!")
 
 
+# --- Марка ---
 @dp.callback_query(F.data.in_({"grade_m150", "grade_m200"}))
-async def on_change_grade(callback: CallbackQuery):
-    """Переключение М150/М200 — пересчёт сметы."""
-    user_id = callback.from_user.id
-    entry = user_measurements.get(user_id)
+async def on_grade(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["grade"] = "М200" if callback.data == "grade_m200" else "М150"
+    await recalc_and_show(callback, st)
+    await callback.answer(f"Марка: {st['grade']}")
 
-    if not entry:
-        await callback.answer("Данные не найдены. Отправь замер заново.")
+
+# --- Скидка / Наценка ---
+@dp.callback_query(F.data.startswith("mod_"))
+async def on_modifier(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
         return
 
-    new_grade = "М200" if callback.data == "grade_m200" else "М150"
-    entry["grade"] = new_grade
+    data = callback.data
 
-    parsed = entry["parsed"]
-    area = parsed.get("area_m2") or 0
-    thickness = parsed.get("thickness_mm_avg") or 0
-    is_city = parsed.get("location_type") != "за городом"
+    if data == "mod_custom_disc":
+        st["awaiting_custom_modifier"] = "disc"
+        await callback.message.answer("📝 Введи % скидки (только число, например: 7):")
+        await callback.answer()
+        return
 
-    estimate = calculate_estimate(
-        area_m2=area,
-        thickness_mm=thickness,
-        is_city=is_city,
-        grade=new_grade,
-        floor=entry.get("floor", 1),
-        distance_materials_km=entry.get("dist_materials", 0),
-        distance_equipment_km=entry.get("dist_equipment", 0),
-        keramzit_area_m2=entry.get("keramzit_area", 0),
-        keramzit_thickness_mm=entry.get("keramzit_thick", 0),
-    )
+    if data == "mod_custom_mark":
+        st["awaiting_custom_modifier"] = "mark"
+        await callback.message.answer("📝 Введи % наценки (только число, например: 12):")
+        await callback.answer()
+        return
 
-    entry["estimate"] = estimate
+    # mod_-5, mod_-3, mod_-1, mod_0, mod_1, mod_3, mod_5
+    val_str = data.replace("mod_", "")
+    try:
+        val = float(val_str)
+    except ValueError:
+        val = 0
 
-    header = format_parsed_result(parsed, db_id=entry["db_id"], created_at=entry["created_at"])
-    estimate_text = format_estimate(estimate)
+    # Тогл: если нажали ту же кнопку — сбрасываем
+    if st.get("modifier") == val and val != 0:
+        st["modifier"] = 0
+    else:
+        st["modifier"] = val
+
+    await recalc_and_show(callback, st)
+    if st["modifier"] == 0:
+        await callback.answer("Сброшено")
+    elif st["modifier"] < 0:
+        await callback.answer(f"Скидка {st['modifier']}%")
+    else:
+        await callback.answer(f"Наценка +{st['modifier']}%")
+
+
+# --- Оплата ---
+@dp.callback_query(F.data.in_({"pay_cash", "pay_bank"}))
+async def on_payment(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["payment"] = "наличными" if callback.data == "pay_cash" else "безналичный расчет"
+
+    # Обновляем клавиатуру без пересчёта сметы
+    parsed = st["parsed"]
+    header = format_parsed_result(parsed, db_id=st["db_id"], created_at=st["created_at"])
+    estimate_text = format_full_estimate(st)
+    keyboard = get_estimate_keyboard(st)
 
     await callback.message.edit_text(
         header + "\n\n" + estimate_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=get_estimate_keyboard(new_grade),
+        reply_markup=keyboard,
     )
-    await callback.answer(f"Пересчитано на {new_grade}")
+    await callback.answer(f"Оплата: {st['payment']}")
 
 
+# --- Вывоз песка ---
+@dp.callback_query(F.data == "sand_toggle")
+async def on_sand(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["sand_removal"] = not st.get("sand_removal", False)
+
+    parsed = st["parsed"]
+    header = format_parsed_result(parsed, db_id=st["db_id"], created_at=st["created_at"])
+    estimate_text = format_full_estimate(st)
+    keyboard = get_estimate_keyboard(st)
+
+    await callback.message.edit_text(
+        header + "\n\n" + estimate_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+    status = "ДА" if st["sand_removal"] else "НЕТ"
+    await callback.answer(f"Вывоз песка: {status}")
+
+
+# --- Генерация КП ---
+@dp.callback_query(F.data == "generate_kp")
+async def on_generate_kp(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st or not st.get("estimate"):
+        await callback.answer("Сначала рассчитай смету.")
+        return
+
+    if not st.get("payment"):
+        await callback.answer("Выбери способ оплаты: Нал или Безнал")
+        return
+
+    await callback.answer("⏳ Генерирую КП...")
+
+    parsed = st["parsed"]
+    estimate = st["estimate"]
+    modifier = st.get("modifier", 0)
+
+    # Пересчитываем итого с модификатором для КП
+    # КП показывает цену клиенту, не базу
+    client_price = calc_client_price(estimate["grand_total"], modifier, st.get("sand_removal", False))
+
+    try:
+        client_name = parsed.get("client_name", "клиент")
+        area = parsed.get("area_m2", 0)
+
+        output_path = f"/tmp/KP_{client_name}_{area}m2.docx"
+
+        generate_kp(
+            parsed=parsed,
+            estimate=estimate,
+            grade=st.get("grade", "М150"),
+            payment_type=st["payment"],
+            include_sand_removal=st.get("sand_removal", False),
+            output_path=output_path,
+        )
+
+        # Отправляем файл
+        doc_file = FSInputFile(output_path, filename=f"КП_{client_name}_{area}м2.docx")
+        await callback.message.answer_document(
+            doc_file,
+            caption=f"📄 КП для {client_name}, {area} м², {st.get('grade', 'М150')}"
+        )
+
+    except Exception as e:
+        logger.error("Ошибка генерации КП: %s", e, exc_info=True)
+        await callback.message.answer("❌ Ошибка генерации КП. Попробуй ещё раз.")
+
+
+# --- Сброс ---
 @dp.callback_query(F.data == "retry")
 async def on_retry(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user_measurements.pop(user_id, None)
+    user_state.pop(callback.from_user.id, None)
     await callback.message.edit_text("🔄 Отправь текст замера заново.")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "fill_missing")
 async def on_fill_missing(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    entry = user_measurements.get(user_id)
-
-    if not entry or not entry["parsed"].get("missing_fields"):
+    st = user_state.get(callback.from_user.id)
+    if not st or not st["parsed"].get("missing_fields"):
         await callback.answer("Нет недостающих полей.")
         return
-
-    missing = entry["parsed"]["missing_fields"]
+    missing = st["parsed"]["missing_fields"]
     await callback.message.answer(
         "📝 <b>Допиши недостающие данные одним сообщением:</b>\n"
         + "\n".join(f"  • {f}" for f in missing),
@@ -366,7 +591,7 @@ async def on_fill_missing(callback: CallbackQuery):
     await callback.answer()
 
 
-# ---------- Запуск ----------
+# ========== Запуск ==========
 
 async def main():
     await init_db()
