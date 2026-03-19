@@ -1,0 +1,486 @@
+"""
+ARTPOL — Калькулятор сметы
+Детерминированный расчёт по формулам отдела продаж.
+Никакого AI — только математика.
+
+Две базы для логистики:
+- Окская Гавань, 1 (56.236821, 43.916676) — песок, цемент, материалы
+- Интернациональная, 100 (56.310043, 43.953282) — оборудование
+"""
+
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# КООРДИНАТЫ БАЗ
+# ============================================================
+
+# База отгрузки материалов (песок, цемент)
+MATERIALS_BASE_LAT = 56.236821
+MATERIALS_BASE_LON = 43.916676
+
+# База оборудования
+EQUIPMENT_BASE_LAT = 56.310043
+EQUIPMENT_BASE_LON = 43.953282
+
+# ============================================================
+# ЦЕНЫ (вынесены для удобства обновления)
+# ============================================================
+
+SAND_PRICE_PER_TON = 670           # ₽/т
+CEMENT_PRICE_PER_BAG = 600         # ₽/мешок
+FIBER_PRICE_PER_KG = 300           # ₽/кг
+FILM_PRICE_PER_M2 = 10             # ₽/м²
+IZOFLEX_PRICE_PER_M = 20           # ₽/пог.м
+REINFORCED_FILM_PRICE_PER_M2 = 40  # ₽/м² (армированная плёнка)
+METAL_MESH_PRICE_PER_M2 = 120      # ₽/м² (мет. сетка)
+
+EQUIPMENT_DELIVERY_CITY = 12000    # ₽ (фикс по НН)
+EQUIPMENT_DELIVERY_OBLAST_PER_KM = 140  # ₽/км
+EQUIPMENT_DELIVERY_OBLAST_BASE = 10000  # ₽
+
+SAND_EXTRA = 1000  # +1000₽ к каждой доставке песка
+
+
+# ============================================================
+# ПЕСОК
+# ============================================================
+
+def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: float = 0) -> dict:
+    """
+    Расчёт песка: количество, стоимость, доставка.
+    distance_km — от Окской Гавани до объекта (для области).
+    """
+    volume_m3 = area_m2 * thickness_mm / 1000
+    sand_tons = volume_m3 * 2
+
+    sand_cost = sand_tons * SAND_PRICE_PER_TON
+
+    if is_city:
+        if sand_tons <= 6:
+            delivery = 5000
+            transport = "ГАЗОН (до 6т)"
+        elif sand_tons <= 18:
+            delivery = 7000
+            transport = "КАМАЗ (6-18т)"
+        else:
+            delivery = 9000
+            transport = "МАЗ (19-30т)"
+    else:
+        if sand_tons <= 19:
+            delivery = 250 * distance_km
+            transport = f"Область до 19т (250₽×{distance_km}км)"
+        else:
+            delivery = 300 * distance_km
+            transport = f"Область 19-30т (300₽×{distance_km}км)"
+
+    total = sand_cost + delivery + SAND_EXTRA
+
+    return {
+        "volume_m3": round(volume_m3, 2),
+        "sand_tons": round(sand_tons, 1),
+        "sand_cost": round(sand_cost),
+        "delivery": round(delivery),
+        "extra": SAND_EXTRA,
+        "transport": transport,
+        "total": round(total),
+    }
+
+
+# ============================================================
+# ЦЕМЕНТ
+# ============================================================
+
+def calc_cement(area_m2: float, thickness_mm: float, grade: str, is_city: bool, distance_km: float = 0) -> dict:
+    """
+    Расчёт цемента: количество мешков, стоимость, доставка.
+    grade: "М150" или "М200"
+    distance_km — от Окской Гавани до объекта (для области).
+    """
+    volume = area_m2 * thickness_mm
+    multiplier = 5 if grade == "М150" else 6
+    bags = math.ceil(volume / 1000 * multiplier)
+
+    cement_cost = bags * CEMENT_PRICE_PER_BAG
+
+    if is_city:
+        if bags <= 35:
+            delivery = 3500
+        elif bags <= 65:
+            delivery = 7000
+        elif bags <= 105:
+            delivery = 10000  # манипулятор 8000 + 2000
+        elif bags <= 206:
+            delivery = 12000  # манипулятор 10000 + 2000
+        else:
+            delivery = 15000  # манипулятор 13000 + 2000
+    else:
+        if bags <= 35:
+            delivery = 100 * distance_km + 2000
+        elif bags <= 65:
+            delivery = 100 * distance_km * 2 + 1000
+        else:
+            # ⚠️ Стоимость манипулятора в область — уточнить у РОПа!
+            delivery = 100 * distance_km * 2 + 2000
+
+    total = cement_cost + delivery
+
+    return {
+        "grade": grade,
+        "bags": bags,
+        "cement_cost": round(cement_cost),
+        "delivery": round(delivery),
+        "total": round(total),
+    }
+
+
+# ============================================================
+# ФИБРА
+# ============================================================
+
+def calc_fiber(area_m2: float, thickness_mm: float) -> dict:
+    """Расчёт фибры."""
+    kg = area_m2 * thickness_mm / 1000 * 0.8
+    cost = kg * FIBER_PRICE_PER_KG
+
+    return {
+        "kg": round(kg, 2),
+        "cost": round(cost),
+    }
+
+
+# ============================================================
+# ПЛЁНКА ТЕХНИЧЕСКАЯ
+# ============================================================
+
+def calc_film(area_m2: float) -> dict:
+    """Расчёт технической плёнки."""
+    m2 = area_m2 * 2 * 1.2
+    cost = m2 * FILM_PRICE_PER_M2
+
+    return {
+        "m2": round(m2, 1),
+        "cost": round(cost),
+    }
+
+
+# ============================================================
+# IZOFLEX (подложка/демпферная лента)
+# ============================================================
+
+def calc_izoflex(area_m2: float) -> dict:
+    """Расчёт подложки Izoflex."""
+    meters = area_m2 * 0.7
+    cost = meters * IZOFLEX_PRICE_PER_M
+
+    return {
+        "meters": round(meters, 1),
+        "cost": round(cost),
+    }
+
+
+# ============================================================
+# ДОСТАВКА ОБОРУДОВАНИЯ
+# ============================================================
+
+def calc_equipment_delivery(is_city: bool, distance_km: float = 0) -> dict:
+    """
+    Доставка оборудования.
+    distance_km — от Интернациональной, 100 до объекта.
+    """
+    if is_city:
+        cost = EQUIPMENT_DELIVERY_CITY
+        detail = "НН фикс"
+    else:
+        cost = EQUIPMENT_DELIVERY_OBLAST_PER_KM * distance_km + EQUIPMENT_DELIVERY_OBLAST_BASE
+        detail = f"140₽×{distance_km}км + 10000"
+
+    return {
+        "cost": round(cost),
+        "detail": detail,
+    }
+
+
+# ============================================================
+# СТОИМОСТЬ РАБОТ
+# ============================================================
+
+# Тарифы: {диапазон_этажей: {диапазон_площади: цена}}
+WORK_TARIFFS = {
+    "low": {  # до 10 этажа
+        "fixed": {
+            (10, 29): 35000,
+            (30, 59): 37000,
+            (60, 79): 38000,
+            (80, 99): 39000,
+        },
+        "per_m2": {
+            (100, 159): 430,
+            (160, 299): 450,
+            (300, 99999): 470,
+        },
+    },
+    "mid": {  # 10-15 этаж
+        "fixed": {
+            (10, 29): 38000,
+            (30, 59): 40000,
+            (60, 79): 42000,
+            (80, 99): 45000,
+        },
+        "per_m2": {
+            (100, 159): 460,
+            (160, 299): 480,
+            (300, 99999): 500,
+        },
+    },
+}
+# Выше 15 этажа = тариф "mid" × 2
+
+
+def calc_work(area_m2: float, floor: int = 1) -> dict:
+    """
+    Расчёт стоимости работ.
+    floor — этаж объекта (влияет на тариф).
+    """
+    # Определяем тарифную группу
+    if floor <= 9:
+        tariff_key = "low"
+        floor_label = "до 10 этажа"
+        multiplier = 1
+    elif floor <= 15:
+        tariff_key = "mid"
+        floor_label = "10-15 этаж"
+        multiplier = 1
+    else:
+        tariff_key = "mid"
+        floor_label = f"выше 15 этажа (×2)"
+        multiplier = 2
+
+    tariff = WORK_TARIFFS[tariff_key]
+
+    # Ищем в фиксированных тарифах
+    for (low, high), price in tariff["fixed"].items():
+        if low <= area_m2 <= high:
+            cost = price * multiplier
+            return {
+                "cost": round(cost),
+                "rate": f"фикс {price}₽" + (f" ×2" if multiplier > 1 else ""),
+                "floor_label": floor_label,
+            }
+
+    # Ищем в тарифах за м²
+    for (low, high), rate in tariff["per_m2"].items():
+        if low <= area_m2 <= high:
+            base_cost = area_m2 * rate
+            cost = base_cost * multiplier
+            return {
+                "cost": round(cost),
+                "rate": f"{rate}₽/м²" + (f" ×2" if multiplier > 1 else ""),
+                "floor_label": floor_label,
+            }
+
+    # Площадь меньше 10м² — минимальный тариф
+    if area_m2 < 10:
+        cost = tariff["fixed"][(10, 29)] * multiplier
+        return {
+            "cost": round(cost),
+            "rate": "минимальный тариф",
+            "floor_label": floor_label,
+        }
+
+    return {
+        "cost": 0,
+        "rate": "⚠️ Не удалось определить тариф",
+        "floor_label": floor_label,
+    }
+
+
+# ============================================================
+# КЕРАМЗИТНОЕ ОСНОВАНИЕ (опция)
+# ============================================================
+
+def calc_keramzit(area_keramzit_m2: float, thickness_keramzit_mm: float, area_stjazhka_m2: float) -> dict:
+    """
+    Расчёт керамзитного основания.
+    area_keramzit_m2 — площадь под керамзит
+    thickness_keramzit_mm — слой керамзита
+    area_stjazhka_m2 — общая площадь стяжки (для расчёта техн. плёнки)
+    """
+    # Армированная плёнка
+    reinforced_film_m2 = math.ceil((area_keramzit_m2 * 1.2) + 2)
+    if reinforced_film_m2 % 2 != 0:
+        reinforced_film_m2 += 1  # всегда чётное
+
+    reinforced_film_cost = reinforced_film_m2 * REINFORCED_FILM_PRICE_PER_M2
+
+    # Мет. сетка (площадь = площадь арм. плёнки)
+    mesh_m2 = reinforced_film_m2
+    mesh_cost = mesh_m2 * METAL_MESH_PRICE_PER_M2
+
+    # Керамзит (мешки)
+    keramzit_bags = math.ceil(area_keramzit_m2 * thickness_keramzit_mm / 0.055 / 1000)
+
+    # Техническая плёнка (общая минус армированная)
+    tech_film_m2 = max(0, area_stjazhka_m2 * 2 * 1.2 - reinforced_film_m2)
+
+    return {
+        "reinforced_film_m2": reinforced_film_m2,
+        "reinforced_film_cost": round(reinforced_film_cost),
+        "mesh_m2": mesh_m2,
+        "mesh_cost": round(mesh_cost),
+        "keramzit_bags": keramzit_bags,
+        "tech_film_m2": round(tech_film_m2, 1),
+    }
+
+
+# ============================================================
+# ПОЛНЫЙ РАСЧЁТ СМЕТЫ
+# ============================================================
+
+def calculate_estimate(
+    area_m2: float,
+    thickness_mm: float,
+    is_city: bool,
+    grade: str = "М150",
+    floor: int = 1,
+    distance_materials_km: float = 0,
+    distance_equipment_km: float = 0,
+) -> dict:
+    """
+    Полный расчёт сметы.
+
+    Параметры:
+    - area_m2: площадь (м²)
+    - thickness_mm: средняя толщина слоя (мм)
+    - is_city: город (True) или область (False)
+    - grade: марка прочности "М150" или "М200"
+    - floor: этаж (для расчёта работ)
+    - distance_materials_km: км от Окской Гавани до объекта (песок, цемент)
+    - distance_equipment_km: км от Интернациональной до объекта (оборудование)
+    """
+    sand = calc_sand(area_m2, thickness_mm, is_city, distance_materials_km)
+    cement = calc_cement(area_m2, thickness_mm, grade, is_city, distance_materials_km)
+    fiber = calc_fiber(area_m2, thickness_mm)
+    film = calc_film(area_m2)
+    izoflex = calc_izoflex(area_m2)
+    equipment = calc_equipment_delivery(is_city, distance_equipment_km)
+    work = calc_work(area_m2, floor)
+
+    # Итого материалы
+    materials_total = (
+        sand["total"]
+        + cement["total"]
+        + fiber["cost"]
+        + film["cost"]
+        + izoflex["cost"]
+    )
+
+    # Итого всё
+    grand_total = materials_total + equipment["cost"] + work["cost"]
+
+    result = {
+        "sand": sand,
+        "cement": cement,
+        "fiber": fiber,
+        "film": film,
+        "izoflex": izoflex,
+        "equipment_delivery": equipment,
+        "work": work,
+        "materials_total": round(materials_total),
+        "grand_total": round(grand_total),
+    }
+
+    logger.info(
+        "Смета: %s м², %s мм, %s, %s, этаж %d → итого %s₽",
+        area_m2, thickness_mm,
+        "город" if is_city else f"область ({distance_materials_km}км)",
+        grade, floor, f"{grand_total:,.0f}",
+    )
+
+    return result
+
+
+# ============================================================
+# ФОРМАТИРОВАНИЕ ДЛЯ МЕНЕДЖЕРА
+# ============================================================
+
+def format_estimate(est: dict) -> str:
+    """Форматирует смету для отображения в Telegram."""
+    s = est["sand"]
+    c = est["cement"]
+    f = est["fiber"]
+    fl = est["film"]
+    iz = est["izoflex"]
+    eq = est["equipment_delivery"]
+    w = est["work"]
+
+    lines = [
+        "💰 <b>СМЕТА:</b>",
+        "",
+        f"🏗 <b>Работа ({w['floor_label']}):</b>",
+        f"    {w['rate']} = <b>{w['cost']:,}₽</b>",
+        "",
+        f"🪨 <b>Песок:</b> {s['sand_tons']}т ({s['transport']})",
+        f"    Песок: {s['sand_cost']:,}₽ + доставка: {s['delivery']:,}₽ + {s['extra']:,}₽",
+        f"    Итого: <b>{s['total']:,}₽</b>",
+        "",
+        f"🧱 <b>Цемент {c['grade']}:</b> {c['bags']} мешков",
+        f"    Цемент: {c['cement_cost']:,}₽ + доставка: {c['delivery']:,}₽",
+        f"    Итого: <b>{c['total']:,}₽</b>",
+        "",
+        f"🧵 Фибра: {f['kg']}кг = {f['cost']:,}₽",
+        f"📄 Плёнка: {fl['m2']}м² = {fl['cost']:,}₽",
+        f"🔇 Izoflex: {iz['meters']}м = {iz['cost']:,}₽",
+        f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})",
+        "",
+        f"📦 Материалы итого: <b>{est['materials_total']:,}₽</b>",
+        f"",
+        f"═══════════════════",
+        f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>",
+    ]
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# БЫСТРЫЙ ТЕСТ
+# ============================================================
+
+if __name__ == "__main__":
+    # Тест 1: квартира в городе, 78м², 50мм, М150, 7 этаж
+    print("=" * 50)
+    print("ТЕСТ 1: Квартира НН, 78м², 50мм, М150, 7 этаж")
+    print("=" * 50)
+    est = calculate_estimate(
+        area_m2=78, thickness_mm=50, is_city=True,
+        grade="М150", floor=7,
+    )
+    print(format_estimate(est).replace("<b>", "").replace("</b>", ""))
+
+    print()
+
+    # Тест 2: дом за городом, 203.8м², 90.5мм, М150, 1 этаж, 25км
+    print("=" * 50)
+    print("ТЕСТ 2: Дом область, 203.8м², 90.5мм, М150, 1 этаж, 25км")
+    print("=" * 50)
+    est2 = calculate_estimate(
+        area_m2=203.8, thickness_mm=90.5, is_city=False,
+        grade="М150", floor=1,
+        distance_materials_km=25, distance_equipment_km=25,
+    )
+    print(format_estimate(est2).replace("<b>", "").replace("</b>", ""))
+
+    print()
+
+    # Тест 3: тот же дом, но М200
+    print("=" * 50)
+    print("ТЕСТ 3: Тот же дом, но М200")
+    print("=" * 50)
+    est3 = calculate_estimate(
+        area_m2=203.8, thickness_mm=90.5, is_city=False,
+        grade="М200", floor=1,
+        distance_materials_km=25, distance_equipment_km=25,
+    )
+    print(format_estimate(est3).replace("<b>", "").replace("</b>", ""))
