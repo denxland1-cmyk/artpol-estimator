@@ -113,6 +113,40 @@ async def parse_measurement_text(text: str) -> dict:
 
 
 async def get_distance_km(lat: float, lon: float) -> dict:
+    """
+    Считает расстояние по дороге от базы до объекта.
+    OSRM (Open Source Routing Machine) — бесплатный, без ключа.
+    ВАЖНО: OSRM принимает координаты как lon,lat (не lat,lon!)
+    Возвращает {"distance_km": число, "duration_min": число} или {"error": ...}
+    """
+    url = (
+        f"https://router.project-osrm.org/route/v1/driving/"
+        f"{BASE_LON},{BASE_LAT};{lon},{lat}"
+    )
+    params = {"overview": "false"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("code") != "Ok":
+            return {"error": f"OSRM code: {data.get('code')}"}
+
+        route = data["routes"][0]
+        distance_km = round(route["distance"] / 1000, 1)
+        duration_min = round(route["duration"] / 60)
+
+        logger.info("OSRM: %.4f,%.4f → %s км (~%s мин)", lat, lon, distance_km, duration_min)
+        return {
+            "distance_km": distance_km,
+            "duration_min": duration_min,
+        }
+
+    except Exception as e:
+        logger.error("Ошибка OSRM: %s", e)
+        return {"error": str(e)}
 
 
 # ---------- ПАСПОРТ — распознавание фото ----------
@@ -222,47 +256,6 @@ async def parse_passport_text(text: str) -> dict:
     except Exception as e:
         logger.error("Паспорт текст: ошибка API: %s", e)
         return {"error": "api_failed", "detail": str(e)}
-
-
-# ---------- OSRM — расстояние по дороге (бесплатно) ----------
-
-
-async def get_distance_km(lat: float, lon: float) -> dict:
-    """
-    Считает расстояние по дороге от базы до объекта.
-    OSRM (Open Source Routing Machine) — бесплатный, без ключа.
-    Docs: https://project-osrm.org/docs/v5.24.0/api/
-    ВАЖНО: OSRM принимает координаты как lon,lat (не lat,lon!)
-    Возвращает {"distance_km": число, "duration_min": число} или {"error": ...}
-    """
-    # OSRM формат: /route/v1/driving/lon1,lat1;lon2,lat2
-    url = (
-        f"https://router.project-osrm.org/route/v1/driving/"
-        f"{BASE_LON},{BASE_LAT};{lon},{lat}"
-    )
-
-    params = {"overview": "false"}
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as http:
-            resp = await http.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-        if data.get("code") != "Ok":
-            return {"error": "routes_failed", "detail": data.get("message", "unknown")}
-
-        route = data["routes"][0]
-        result = {
-            "distance_km": round(route["distance"] / 1000, 1),
-            "duration_min": round(route["duration"] / 60),
-        }
-        logger.info("Расстояние: %s км, время: %s мин", result["distance_km"], result["duration_min"])
-        return result
-
-    except Exception as e:
-        logger.error("Ошибка OSRM API: %s", e)
-        return {"error": "routes_failed", "detail": str(e)}
 
 
 # ---------- Полный пайплайн ----------
