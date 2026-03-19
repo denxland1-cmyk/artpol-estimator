@@ -72,16 +72,6 @@ async def get_materials_distance(lat: float, lon: float) -> float:
     return 0
 
 
-def calc_client_price(base: int, modifier: float, sand_removal: bool) -> int:
-    """Считает цену клиенту от базы + модификатор + вывоз песка."""
-    total = base
-    if sand_removal:
-        total += 5000
-    if modifier != 0:
-        total = total * (1 + modifier / 100)
-    return round(total)
-
-
 # ========== Форматирование ==========
 
 def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
@@ -147,26 +137,16 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
 
 
 def format_full_estimate(st: dict) -> str:
-    """Смета + цена клиенту."""
+    """Смета + вывоз песка."""
     est = st["estimate"]
-    modifier = st.get("modifier", 0)
     sand_removal = st.get("sand_removal", False)
 
     lines = [format_estimate(est)]
 
-    base = est["grand_total"]
-    client_price = calc_client_price(base, modifier, sand_removal)
-
-    if modifier != 0 or sand_removal:
-        lines.append("")
-        parts = []
-        if sand_removal:
-            parts.append("вывоз песка +5,000₽")
-        if modifier < 0:
-            parts.append(f"скидка {modifier}%")
-        elif modifier > 0:
-            parts.append(f"наценка +{modifier}%")
-        lines.append(f"💰 <b>Цена клиенту ({', '.join(parts)}): {client_price:,}₽</b>")
+    if sand_removal:
+        total_with_sand = est["grand_total"] + 5000
+        lines.append(f"\n🚛 + Вывоз песка: 5,000₽")
+        lines.append(f"💰 <b>ИТОГО с вывозом: {total_with_sand:,}₽</b>")
 
     return "\n".join(lines)
 
@@ -267,6 +247,7 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
         distance_equipment_km=st.get("dist_equipment", 0),
         keramzit_area_m2=st.get("keramzit_area", 0),
         keramzit_thickness_mm=st.get("keramzit_thick", 0),
+        price_modifier=st.get("modifier", 0),
     )
     st["estimate"] = estimate
 
@@ -326,6 +307,7 @@ async def handle_text(message: Message):
                 distance_equipment_km=st.get("dist_equipment", 0),
                 keramzit_area_m2=st.get("keramzit_area", 0),
                 keramzit_thickness_mm=st.get("keramzit_thick", 0),
+                price_modifier=st.get("modifier", 0),
             )
             st["estimate"] = estimate
 
@@ -535,17 +517,17 @@ async def on_generate_kp(callback: CallbackQuery):
 
     parsed = st["parsed"]
     estimate = st["estimate"]
-    modifier = st.get("modifier", 0)
-
-    # Пересчитываем итого с модификатором для КП
-    # КП показывает цену клиенту, не базу
-    client_price = calc_client_price(estimate["grand_total"], modifier, st.get("sand_removal", False))
 
     try:
         client_name = parsed.get("client_name", "клиент")
         area = parsed.get("area_m2", 0)
 
-        output_path = f"/tmp/KP_{client_name}_{area}m2.docx"
+        from datetime import datetime, timezone, timedelta
+        msk = timezone(timedelta(hours=3))
+        ts = datetime.now(msk).strftime("%H%M%S")
+        db_id = st.get("db_id", 0)
+
+        output_path = f"/tmp/KP_{db_id}_{client_name}_{area}m2_{ts}.docx"
 
         generate_kp(
             parsed=parsed,
@@ -557,7 +539,7 @@ async def on_generate_kp(callback: CallbackQuery):
         )
 
         # Отправляем файл
-        doc_file = FSInputFile(output_path, filename=f"КП_{client_name}_{area}м2.docx")
+        doc_file = FSInputFile(output_path, filename=f"КП_{db_id}_{client_name}_{area}м2.docx")
         await callback.message.answer_document(
             doc_file,
             caption=f"📄 КП для {client_name}, {area} м², {st.get('grade', 'М150')}"

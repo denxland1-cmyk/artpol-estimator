@@ -349,6 +349,7 @@ def calculate_estimate(
     distance_equipment_km: float = 0,
     keramzit_area_m2: float = 0,
     keramzit_thickness_mm: float = 0,
+    price_modifier: float = 0,
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -363,13 +364,33 @@ def calculate_estimate(
     - distance_equipment_km: км от Интернациональной до объекта (оборудование)
     - keramzit_area_m2: площадь керамзитного основания (0 = без керамзита)
     - keramzit_thickness_mm: толщина слоя керамзита в мм
+    - price_modifier: скидка/наценка в % (например -5 = скидка 5%, +3 = наценка 3%)
     """
+    # Коэффициент цены: -5% → 0.95, +3% → 1.03
+    k = 1 + price_modifier / 100 if price_modifier != 0 else 1
+
     sand = calc_sand(area_m2, thickness_mm, is_city, distance_materials_km)
     cement = calc_cement(area_m2, thickness_mm, grade, is_city, distance_materials_km)
     fiber = calc_fiber(area_m2, thickness_mm)
     izoflex = calc_izoflex(area_m2)
     equipment = calc_equipment_delivery(is_city, distance_equipment_km)
     work = calc_work(area_m2, floor)
+
+    # Применяем коэффициент ко всем ценам
+    if k != 1:
+        sand["sand_cost"] = round(sand["sand_cost"] * k)
+        sand["delivery"] = round(sand["delivery"] * k)
+        sand["extra"] = round(sand["extra"] * k)
+        sand["total"] = sand["sand_cost"] + sand["delivery"] + sand["extra"]
+
+        cement["cement_cost"] = round(cement["cement_cost"] * k)
+        cement["delivery"] = round(cement["delivery"] * k)
+        cement["total"] = cement["cement_cost"] + cement["delivery"]
+
+        fiber["cost"] = round(fiber["cost"] * k)
+        izoflex["cost"] = round(izoflex["cost"] * k)
+        equipment["cost"] = round(equipment["cost"] * k)
+        work["cost"] = round(work["cost"] * k)
 
     # Керамзит
     has_keramzit = keramzit_area_m2 > 0 and keramzit_thickness_mm > 0
@@ -385,14 +406,10 @@ def calculate_estimate(
 
         # Доставка материалов керамзита
         if is_city:
-            keramzit["delivery"] = 7000  # фикс по НН
-            # Доп. доставки
+            keramzit["delivery"] = 7000
             keramzit["extra_delivery"] = 0
-            # Если тоннаж > 3т — керамзит везёт поставщик +2500
-            # (упрощённо: если > 50 мешков)
             if keramzit["keramzit_bags"] > 50:
                 keramzit["extra_delivery"] += 2500
-            # Мет. сетка от 200м² — поставщик +2000
             if keramzit["mesh_m2"] >= 200:
                 keramzit["extra_delivery"] += 2000
         else:
@@ -400,8 +417,24 @@ def calculate_estimate(
             keramzit["extra_delivery"] = 0
 
         keramzit["delivery_total"] = keramzit["delivery"] + keramzit["extra_delivery"]
+
+        keramzit["keramzit_cost"] = keramzit["keramzit_bags"] * 340
+        keramzit["keramzit_work_cost"] = round(keramzit_area_m2 * 220)
+        keramzit["keramzit_work_rate"] = 220
+
+        # Применяем коэффициент к керамзиту
+        if k != 1:
+            keramzit["reinforced_film_cost"] = round(keramzit["reinforced_film_cost"] * k)
+            keramzit["mesh_cost"] = round(keramzit["mesh_cost"] * k)
+            keramzit["keramzit_cost"] = round(keramzit["keramzit_cost"] * k)
+            keramzit["delivery_total"] = round(keramzit["delivery_total"] * k)
+            keramzit["keramzit_work_cost"] = round(keramzit["keramzit_work_cost"] * k)
     else:
         film = calc_film(area_m2)
+
+    # Применяем коэффициент к плёнке
+    if k != 1:
+        film["cost"] = round(film["cost"] * k)
 
     # Итого материалы
     materials_total = (
@@ -416,12 +449,9 @@ def calculate_estimate(
         materials_total += (
             keramzit["reinforced_film_cost"]
             + keramzit["mesh_cost"]
-            + keramzit["keramzit_bags"] * 340  # 340₽/мешок
+            + keramzit["keramzit_cost"]
             + keramzit["delivery_total"]
         )
-        keramzit["keramzit_cost"] = keramzit["keramzit_bags"] * 340
-        keramzit["keramzit_work_cost"] = round(keramzit_area_m2 * 220)  # 220₽/м²
-        keramzit["keramzit_work_rate"] = 220
 
     # Итого всё
     grand_total = materials_total + equipment["cost"] + work["cost"]
@@ -437,6 +467,7 @@ def calculate_estimate(
         "equipment_delivery": equipment,
         "work": work,
         "keramzit": keramzit,
+        "price_modifier": price_modifier,
         "materials_total": round(materials_total),
         "grand_total": round(grand_total),
     }
@@ -501,7 +532,14 @@ def format_estimate(est: dict) -> str:
     lines.append(f"📦 Материалы итого: <b>{est['materials_total']:,}₽</b>")
     lines.append("")
     lines.append(f"═══════════════════")
-    lines.append(f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>")
+
+    mod = est.get("price_modifier", 0)
+    if mod < 0:
+        lines.append(f"💰 <b>ИТОГО (скидка {mod}%): {est['grand_total']:,}₽</b>")
+    elif mod > 0:
+        lines.append(f"💰 <b>ИТОГО (наценка +{mod}%): {est['grand_total']:,}₽</b>")
+    else:
+        lines.append(f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>")
 
     return "\n".join(lines)
 
