@@ -270,11 +270,14 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
     estimate_text = format_full_estimate(st)
     keyboard = get_estimate_keyboard(st)
 
-    await callback.message.edit_text(
-        header + "\n\n" + estimate_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
+    try:
+        await callback.message.edit_text(
+            header + "\n\n" + estimate_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        pass  # message not modified — OK
 
 
 # ========== Хендлеры ==========
@@ -520,11 +523,14 @@ async def on_payment(callback: CallbackQuery):
     estimate_text = format_full_estimate(st)
     keyboard = get_estimate_keyboard(st)
 
-    await callback.message.edit_text(
-        header + "\n\n" + estimate_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
+    try:
+        await callback.message.edit_text(
+            header + "\n\n" + estimate_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        pass
     await callback.answer(f"Оплата: {st['payment']}")
 
 
@@ -542,11 +548,14 @@ async def on_sand(callback: CallbackQuery):
     estimate_text = format_full_estimate(st)
     keyboard = get_estimate_keyboard(st)
 
-    await callback.message.edit_text(
-        header + "\n\n" + estimate_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
+    try:
+        await callback.message.edit_text(
+            header + "\n\n" + estimate_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        pass
     status = "ДА" if st["sand_removal"] else "НЕТ"
     await callback.answer(f"Вывоз песка: {status}")
 
@@ -615,8 +624,14 @@ async def on_generate_kp(callback: CallbackQuery):
 @dp.callback_query(F.data == "retry")
 async def on_retry(callback: CallbackQuery):
     user_state.pop(callback.from_user.id, None)
-    await callback.message.edit_text("🔄 Отправь текст замера заново.")
-    await callback.answer()
+    try:
+        await callback.message.edit_text("🔄 Отправь текст замера заново.")
+    except Exception:
+        await callback.message.answer("🔄 Отправь текст замера заново.")
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 
 # --- Договор: FSM ---
