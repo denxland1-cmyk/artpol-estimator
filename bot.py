@@ -519,15 +519,26 @@ async def on_generate_kp(callback: CallbackQuery):
     estimate = st["estimate"]
 
     try:
-        client_name = parsed.get("client_name", "клиент")
-        area = parsed.get("area_m2", 0)
-
         from datetime import datetime, timezone, timedelta
         msk = timezone(timedelta(hours=3))
         ts = datetime.now(msk).strftime("%H%M%S")
-        db_id = st.get("db_id", 0)
 
-        output_path = f"/tmp/KP_{db_id}_{client_name}_{area}m2_{ts}.docx"
+        client_name = parsed.get("client_name", "клиент")
+        area = parsed.get("area_m2", 0)
+        thickness = parsed.get("thickness_mm_avg", 0)
+
+        total = estimate["grand_total"]
+        if st.get("sand_removal"):
+            total += 5000
+
+        # Населённый пункт из location_type
+        loc = parsed.get("location_type", "город")
+
+        fname = f"{client_name}_{loc}_{int(area)}-{int(thickness)}_{total}руб"
+        # Убираем спецсимволы из имени файла
+        fname_clean = "".join(c for c in fname if c.isalnum() or c in "._-")
+
+        output_path = f"/tmp/KP_{fname_clean}_{ts}.docx"
 
         generate_kp(
             parsed=parsed,
@@ -539,7 +550,7 @@ async def on_generate_kp(callback: CallbackQuery):
         )
 
         # Отправляем файл
-        doc_file = FSInputFile(output_path, filename=f"КП_{db_id}_{client_name}_{area}м2.docx")
+        doc_file = FSInputFile(output_path, filename=f"КП_{fname}.docx")
         await callback.message.answer_document(
             doc_file,
             caption=f"📄 КП для {client_name}, {area} м², {st.get('grade', 'М150')}"
