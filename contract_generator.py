@@ -392,10 +392,24 @@ def generate_contract(
     _replace_in_doc(doc, "средней толщине стяжки  мм", f"средней толщине стяжки {thickness} мм")
     _replace_in_doc(doc, "средней толщине стяжки мм", f"средней толщине стяжки {thickness} мм")
 
-    # Дата начала работ п.3.1
-    _replace_in_doc(doc, ".01.2026г.", f"{work_start}")
-    # Дата завершения п.3.2
-    _replace_in_doc(doc, ".01.2026г", f"{work_end}")
+    # Дата начала работ п.3.1 и завершения п.3.2
+    # Текст разбит по runs — заменяем напрямую
+    for para in doc.paragraphs:
+        if "начать работы на объекте Заказчика" in para.text:
+            # Собираем весь текст, заменяем, пишем в первый run
+            new_text = f"3.1. Подрядчик обязуется начать работы на объекте Заказчика {work_start}"
+            para.runs[0].text = new_text
+            for r in para.runs[1:]:
+                r.text = ""
+            break
+
+    for para in doc.paragraphs:
+        if "готовности сдачи результата работ" in para.text and "3.2" in para.text:
+            new_text = f"3.2. Подрядчик обязуется завершить работы и сообщить Заказчику о готовности сдачи результата работ {work_end}"
+            para.runs[0].text = new_text
+            for r in para.runs[1:]:
+                r.text = ""
+            break
 
     # Дата в приложении
     _replace_in_doc(doc, "от 13.01.2026 г.", f"от {contract_date} г.")
