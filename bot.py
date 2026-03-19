@@ -27,6 +27,13 @@ from kp_generator import generate_kp
 
 BOT_TOKEN = os.environ["ESTIMATOR_BOT_TOKEN"]
 
+# Whitelist менеджеров — ID через запятую в Railway Variables
+# Если не задано — бот открыт для всех (для тестирования)
+_allowed_raw = os.environ.get("ALLOWED_USERS", "")
+ALLOWED_USERS = set()
+if _allowed_raw.strip():
+    ALLOWED_USERS = {int(x.strip()) for x in _allowed_raw.split(",") if x.strip().isdigit()}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -37,10 +44,16 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Состояние менеджера
-# user_id -> {parsed, db_id, created_at, grade, modifier, payment, sand_removal,
-#             estimate, dist_materials, dist_equipment, floor, keramzit_area, keramzit_thick,
-#             awaiting_custom_modifier}
 user_state = {}
+
+
+# ========== Проверка доступа ==========
+
+def is_allowed(user_id: int) -> bool:
+    """Проверяет доступ. Если ALLOWED_USERS пуст — доступ для всех."""
+    if not ALLOWED_USERS:
+        return True
+    return user_id in ALLOWED_USERS
 
 
 # ========== Вспомогательные ==========
@@ -266,6 +279,10 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ ограничен. Обратитесь к руководителю.")
+        logger.warning("Отказ: user_id=%s (%s)", message.from_user.id, message.from_user.full_name)
+        return
     await message.answer(
         "👷 <b>ARTPOL Агент-Сметчик</b>\n\n"
         "Отправь мне текст замера — я распознаю параметры и посчитаю смету.\n\n"
@@ -281,6 +298,11 @@ async def cmd_start(message: Message):
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     user_id = message.from_user.id
+
+    if not is_allowed(user_id):
+        await message.answer("⛔ Доступ ограничен.")
+        return
+
     st = user_state.get(user_id)
 
     # Ждём ввод пользовательского % скидки/наценки?
@@ -589,6 +611,10 @@ async def on_fill_missing(callback: CallbackQuery):
 async def main():
     await init_db()
     logger.info("Бот ARTPOL Агент-Сметчик запущен")
+    if ALLOWED_USERS:
+        logger.info("Доступ ограничен: %d менеджеров", len(ALLOWED_USERS))
+    else:
+        logger.info("⚠️ ALLOWED_USERS не задан — бот открыт для всех!")
     try:
         await dp.start_polling(bot)
     finally:
