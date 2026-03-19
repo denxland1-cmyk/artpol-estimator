@@ -392,6 +392,14 @@ def calculate_estimate(
         equipment["cost"] = round(equipment["cost"] * k)
         work["cost"] = round(work["cost"] * k)
 
+        # Обновляем rate — чтобы в КП показывало новую цену
+        if "фикс" in work.get("rate", ""):
+            work["rate"] = f"фикс {work['cost']}₽"
+        else:
+            # Для тарифов за м² пересчитываем ставку
+            new_rate = round(work["cost"] / area_m2) if area_m2 > 0 else 0
+            work["rate"] = f"{new_rate}₽/м²"
+
     # Керамзит
     has_keramzit = keramzit_area_m2 > 0 and keramzit_thickness_mm > 0
     keramzit = None
@@ -424,6 +432,7 @@ def calculate_estimate(
             keramzit["mesh_cost"] = round(keramzit["mesh_cost"] * k)
             keramzit["keramzit_cost"] = round(keramzit["keramzit_cost"] * k)
             keramzit["keramzit_work_cost"] = round(keramzit["keramzit_work_cost"] * k)
+            keramzit["keramzit_work_rate"] = round(220 * k)
     else:
         film = calc_film(area_m2)
 
