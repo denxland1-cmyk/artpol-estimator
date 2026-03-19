@@ -123,6 +123,9 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
         lines.append("🔥 Тёплый пол: да")
     elif data.get("warm_floor") is False:
         lines.append("❄️ Тёплый пол: нет")
+    if data.get("keramzit"):
+        k = data["keramzit"]
+        lines.append(f"🟤 Керамзит: {k.get('area_m2', '?')} м², слой {k.get('thickness_mm', '?')} мм")
     if data.get("deadline"):
         lines.append(f"⏰ Сроки: {data['deadline']}")
     if data.get("special_conditions"):
@@ -257,6 +260,11 @@ async def on_confirm(callback: CallbackQuery):
             # Расстояние от базы материалов (Окская Гавань)
             dist_materials = await get_materials_distance(coords["lat"], coords["lon"])
 
+    # Керамзит
+    keramzit_data = parsed.get("keramzit") or {}
+    ker_area = keramzit_data.get("area_m2", 0) or 0
+    ker_thick = keramzit_data.get("thickness_mm", 0) or 0
+
     # Считаем смету
     estimate = calculate_estimate(
         area_m2=area,
@@ -266,12 +274,16 @@ async def on_confirm(callback: CallbackQuery):
         floor=floor,
         distance_materials_km=dist_materials,
         distance_equipment_km=dist_equipment,
+        keramzit_area_m2=ker_area,
+        keramzit_thickness_mm=ker_thick,
     )
 
     entry["estimate"] = estimate
     entry["dist_materials"] = dist_materials
     entry["dist_equipment"] = dist_equipment
     entry["floor"] = floor
+    entry["keramzit_area"] = ker_area
+    entry["keramzit_thick"] = ker_thick
 
     # Формируем сообщение
     header = format_parsed_result(parsed, db_id=entry["db_id"], created_at=entry["created_at"])
@@ -311,6 +323,8 @@ async def on_change_grade(callback: CallbackQuery):
         floor=entry.get("floor", 1),
         distance_materials_km=entry.get("dist_materials", 0),
         distance_equipment_km=entry.get("dist_equipment", 0),
+        keramzit_area_m2=entry.get("keramzit_area", 0),
+        keramzit_thickness_mm=entry.get("keramzit_thick", 0),
     )
 
     entry["estimate"] = estimate

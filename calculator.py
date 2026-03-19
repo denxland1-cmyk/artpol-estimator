@@ -347,6 +347,8 @@ def calculate_estimate(
     floor: int = 1,
     distance_materials_km: float = 0,
     distance_equipment_km: float = 0,
+    keramzit_area_m2: float = 0,
+    keramzit_thickness_mm: float = 0,
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -359,14 +361,47 @@ def calculate_estimate(
     - floor: этаж (для расчёта работ)
     - distance_materials_km: км от Окской Гавани до объекта (песок, цемент)
     - distance_equipment_km: км от Интернациональной до объекта (оборудование)
+    - keramzit_area_m2: площадь керамзитного основания (0 = без керамзита)
+    - keramzit_thickness_mm: толщина слоя керамзита в мм
     """
     sand = calc_sand(area_m2, thickness_mm, is_city, distance_materials_km)
     cement = calc_cement(area_m2, thickness_mm, grade, is_city, distance_materials_km)
     fiber = calc_fiber(area_m2, thickness_mm)
-    film = calc_film(area_m2)
     izoflex = calc_izoflex(area_m2)
     equipment = calc_equipment_delivery(is_city, distance_equipment_km)
     work = calc_work(area_m2, floor)
+
+    # Керамзит
+    has_keramzit = keramzit_area_m2 > 0 and keramzit_thickness_mm > 0
+    keramzit = None
+
+    if has_keramzit:
+        keramzit = calc_keramzit(keramzit_area_m2, keramzit_thickness_mm, area_m2)
+
+        # Техническая плёнка уменьшается на армированную
+        film = calc_film(area_m2)
+        film["m2"] = round(max(0, film["m2"] - keramzit["reinforced_film_m2"]), 1)
+        film["cost"] = round(film["m2"] * FILM_PRICE_PER_M2)
+
+        # Доставка материалов керамзита
+        if is_city:
+            keramzit["delivery"] = 7000  # фикс по НН
+            # Доп. доставки
+            keramzit["extra_delivery"] = 0
+            # Если тоннаж > 3т — керамзит везёт поставщик +2500
+            # (упрощённо: если > 50 мешков)
+            if keramzit["keramzit_bags"] > 50:
+                keramzit["extra_delivery"] += 2500
+            # Мет. сетка от 200м² — поставщик +2000
+            if keramzit["mesh_m2"] >= 200:
+                keramzit["extra_delivery"] += 2000
+        else:
+            keramzit["delivery"] = round((100 * distance_materials_km + 1000) * 2)
+            keramzit["extra_delivery"] = 0
+
+        keramzit["delivery_total"] = keramzit["delivery"] + keramzit["extra_delivery"]
+    else:
+        film = calc_film(area_m2)
 
     # Итого материалы
     materials_total = (
@@ -377,8 +412,21 @@ def calculate_estimate(
         + izoflex["cost"]
     )
 
+    if has_keramzit:
+        materials_total += (
+            keramzit["reinforced_film_cost"]
+            + keramzit["mesh_cost"]
+            + keramzit["keramzit_bags"] * 340  # 340₽/мешок
+            + keramzit["delivery_total"]
+        )
+        keramzit["keramzit_cost"] = keramzit["keramzit_bags"] * 340
+        keramzit["keramzit_work_cost"] = round(keramzit_area_m2 * 220)  # 220₽/м²
+        keramzit["keramzit_work_rate"] = 220
+
     # Итого всё
     grand_total = materials_total + equipment["cost"] + work["cost"]
+    if has_keramzit:
+        grand_total += keramzit["keramzit_work_cost"]
 
     result = {
         "sand": sand,
@@ -388,15 +436,18 @@ def calculate_estimate(
         "izoflex": izoflex,
         "equipment_delivery": equipment,
         "work": work,
+        "keramzit": keramzit,
         "materials_total": round(materials_total),
         "grand_total": round(grand_total),
     }
 
     logger.info(
-        "Смета: %s м², %s мм, %s, %s, этаж %d → итого %s₽",
+        "Смета: %s м², %s мм, %s, %s, этаж %d%s → итого %s₽",
         area_m2, thickness_mm,
         "город" if is_city else f"область ({distance_materials_km}км)",
-        grade, floor, f"{grand_total:,.0f}",
+        grade, floor,
+        f", керамзит {keramzit_area_m2}м²×{keramzit_thickness_mm}мм" if has_keramzit else "",
+        f"{grand_total:,.0f}",
     )
 
     return result
@@ -415,6 +466,7 @@ def format_estimate(est: dict) -> str:
     iz = est["izoflex"]
     eq = est["equipment_delivery"]
     w = est["work"]
+    k = est.get("keramzit")
 
     lines = [
         "💰 <b>СМЕТА:</b>",
@@ -431,15 +483,25 @@ def format_estimate(est: dict) -> str:
         f"    Итого: <b>{c['total']:,}₽</b>",
         "",
         f"🧵 Фибра: {f['kg']}кг = {f['cost']:,}₽",
-        f"📄 Плёнка: {fl['m2']}м² = {fl['cost']:,}₽",
+        f"📄 Плёнка техн.: {fl['m2']}м² = {fl['cost']:,}₽",
         f"🔇 Izoflex: {iz['meters']}м = {iz['cost']:,}₽",
-        f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})",
-        "",
-        f"📦 Материалы итого: <b>{est['materials_total']:,}₽</b>",
-        f"",
-        f"═══════════════════",
-        f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>",
     ]
+
+    if k:
+        lines.append("")
+        lines.append(f"🟤 <b>Керамзитное основание:</b>")
+        lines.append(f"    Керамзит: {k['keramzit_bags']} мешков × 340₽ = {k['keramzit_cost']:,}₽")
+        lines.append(f"    Арм. плёнка: {k['reinforced_film_m2']}м² = {k['reinforced_film_cost']:,}₽")
+        lines.append(f"    Мет. сетка: {k['mesh_m2']}м² = {k['mesh_cost']:,}₽")
+        lines.append(f"    Доставка: {k['delivery_total']:,}₽")
+        lines.append(f"    Работа керамзит: {k['keramzit_work_rate']}₽/м² = {k['keramzit_work_cost']:,}₽")
+
+    lines.append(f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})")
+    lines.append("")
+    lines.append(f"📦 Материалы итого: <b>{est['materials_total']:,}₽</b>")
+    lines.append("")
+    lines.append(f"═══════════════════")
+    lines.append(f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>")
 
     return "\n".join(lines)
 
@@ -484,3 +546,16 @@ if __name__ == "__main__":
         distance_materials_km=25, distance_equipment_km=25,
     )
     print(format_estimate(est3).replace("<b>", "").replace("</b>", ""))
+
+    print()
+
+    # Тест 4: с керамзитом
+    print("=" * 50)
+    print("ТЕСТ 4: Дом с керамзитом, 120м², стяжка 60мм, керамзит 80м²×40мм, город")
+    print("=" * 50)
+    est4 = calculate_estimate(
+        area_m2=120, thickness_mm=60, is_city=True,
+        grade="М150", floor=1,
+        keramzit_area_m2=80, keramzit_thickness_mm=40,
+    )
+    print(format_estimate(est4).replace("<b>", "").replace("</b>", ""))
