@@ -11,6 +11,11 @@ from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 
 from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn, nsdecls
+from docx.oxml import parse_xml
 
 logger = logging.getLogger(__name__)
 
@@ -86,46 +91,198 @@ def _replace_in_paragraph(paragraph, old_text, new_text):
     """
     Заменяет текст в параграфе, даже если он разбит на несколько runs.
     """
-    # Сначала пробуем простую замену в каждом run
     for run in paragraph.runs:
         if old_text in run.text:
             run.text = run.text.replace(old_text, new_text)
             return True
 
-    # Если не нашли — текст может быть разбит по runs
     full_text = paragraph.text
     if old_text not in full_text:
         return False
 
-    # Собираем все runs с текстом
     runs_with_text = [(i, run) for i, run in enumerate(paragraph.runs) if run.text]
     if not runs_with_text:
         return False
 
-    # Склеиваем текст, находим позицию, распределяем по runs
     concat = ""
-    run_boundaries = []  # (start_pos, end_pos, run_index)
     for i, run in runs_with_text:
-        start = len(concat)
         concat += run.text
-        run_boundaries.append((start, len(concat), i))
 
     find_pos = concat.find(old_text)
     if find_pos == -1:
         return False
 
     find_end = find_pos + len(old_text)
-
-    # Определяем какие runs затронуты
     new_concat = concat[:find_pos] + new_text + concat[find_end:]
 
-    # Простой подход: записываем весь текст в первый run, остальные очищаем
     first_run_idx = runs_with_text[0][0]
     paragraph.runs[first_run_idx].text = new_concat
     for i, run in runs_with_text[1:]:
         run.text = ""
 
     return True
+
+
+def _set_table_cell(cell, text, bold=False, size=9, align=WD_ALIGN_PARAGRAPH.LEFT):
+    """Настраивает ячейку таблицы сметы."""
+    cell.text = ""
+    p = cell.paragraphs[0]
+    p.alignment = align
+    p.paragraph_format.space_before = Pt(1)
+    p.paragraph_format.space_after = Pt(1)
+    run = p.add_run(str(text))
+    run.font.size = Pt(size)
+    run.font.name = "Times New Roman"
+    run.bold = bold
+
+
+def _shade_cells(row, color):
+    """Заливает ячейки строки цветом."""
+    for cell in row.cells:
+        shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color}"/>')
+        cell._tc.get_or_add_tcPr().append(shading)
+
+
+def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, include_sand_removal):
+    """Вставляет таблицу сметы после п.2.1."""
+    # Находим параграф с суммой
+    target_idx = None
+    for i, para in enumerate(doc.paragraphs):
+        if "рублей 00 копеек" in para.text:
+            target_idx = i
+            break
+
+    if target_idx is None:
+        logger.warning("Не нашёл п.2.1 для вставки таблицы")
+        return
+
+    s = estimate["sand"]
+    c = estimate["cement"]
+    f = estimate["fiber"]
+    fl = estimate["film"]
+    iz = estimate["izoflex"]
+    eq = estimate["equipment_delivery"]
+    w = estimate["work"]
+    k = estimate.get("keramzit")
+    volume = round(area * thickness / 1000, 3)
+
+    ker_data = parsed.get("keramzit") or {}
+    ker_area = ker_data.get("area_m2", 0)
+    ker_thick = ker_data.get("thickness_mm", 0)
+
+    L = WD_ALIGN_PARAGRAPH.LEFT
+    R = WD_ALIGN_PARAGRAPH.RIGHT
+    C = WD_ALIGN_PARAGRAPH.CENTER
+    BLUE_LIGHT = "DCE6F1"
+    BLUE_HEADER = "B8CCE4"
+
+    # Создаём таблицу
+    table = doc.add_table(rows=0, cols=5)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+    # Ширина на всю страницу
+    tbl = table._tbl
+    tblPr = tbl.tblPr if tbl.tblPr is not None else parse_xml(f'<w:tblPr {nsdecls("w")}/>')
+    tblW = parse_xml(f'<w:tblW {nsdecls("w")} w:w="5000" w:type="pct"/>')
+    for old in tblPr.findall(qn("w:tblW")):
+        tblPr.remove(old)
+    tblPr.append(tblW)
+
+    def add_row(data, shade=None):
+        row = table.add_row()
+        for i, (text, bold, align) in enumerate(data):
+            _set_table_cell(row.cells[i], text, bold=bold, size=9, align=align)
+        if shade:
+            _shade_cells(row, shade)
+        return row
+
+    # Шапка: керамзит (если есть)
+    if k and ker_area:
+        add_row([("", False, L), (f"{ker_area}", False, R), ("", False, L),
+                 (f"{ker_thick}", False, R), ("", False, R)], shade=BLUE_LIGHT)
+
+    # Шапка: стяжка
+    add_row([("", False, L), (f"{area}", False, R), ("", False, L),
+             (f"{thickness}", False, R), (f"{volume}", False, R)], shade=BLUE_LIGHT)
+
+    # Заголовки
+    add_row([("материалы и транспортные расходы", True, L), ("ед. изм.", True, C),
+             ("кол-во ед.", True, C), ("Стоимость ед.", True, C),
+             ("ИТОГО", True, R)], shade=BLUE_HEADER)
+
+    # Песок
+    add_row([(f"Песок {s['sand_tons']}т+доставка", False, L), ("рейс", False, C),
+             ("1", False, R), (f"{s['total']}", False, R), (f"{s['total']}", False, R)])
+
+    # Цемент
+    ppb = c["cement_cost"] // c["bags"] if c["bags"] > 0 else 0
+    add_row([("Цемент М500 по 50 кг", False, L), ("мешок", False, C),
+             (f"{c['bags']}", False, R), (f"{ppb}", False, R), (f"{c['cement_cost']}", False, R)])
+
+    # Фибра
+    add_row([("Фибра ВСМ 12 мм 20 мк", False, L), ("кг", False, C),
+             (f"{f['kg']}", False, R), ("300", False, R), (f"{f['cost']}", False, R)])
+
+    # Плёнка
+    add_row([("Пленка 60 мкр техническая", False, L), ("м2", False, C),
+             (f"{fl['m2']}", False, R), ("10", False, R), (f"{fl['cost']}", False, R)])
+
+    # Izoflex
+    add_row([("IZOFLEX 10 мм", False, L), ("пог.м.", False, C),
+             (f"{iz['meters']}", False, R), ("20", False, R), (f"{iz['cost']}", False, R)])
+
+    # Керамзит материалы
+    if k:
+        add_row([("Керамзит (0,075м3)", False, L), ("мешок", False, C),
+                 (f"{k['keramzit_bags']}", False, R), ("340", False, R),
+                 (f"{k['keramzit_cost']}", False, R)])
+        add_row([("Армированная пленка 100г/м", False, L), ("м2", False, C),
+                 (f"{k['reinforced_film_m2']}", False, R), ("40", False, R),
+                 (f"{k['reinforced_film_cost']}", False, R)])
+        add_row([("Металлическая сетка", False, L), ("м2", False, C),
+                 (f"{k['mesh_m2']}", False, R), ("120", False, R),
+                 (f"{k['mesh_cost']}", False, R)])
+
+    # Доставка материалов
+    add_row([("Доставка материалов", False, L), ("рейс", False, C),
+             ("1", False, R), (f"{c['delivery']}", False, R), (f"{c['delivery']}", False, R)])
+
+    # Доставка оборудования
+    add_row([("Доставка/вывоз оборудования", False, L), ("рейс", False, C),
+             ("1", False, R), (f"{eq['cost']}", False, R), (f"{eq['cost']}", False, R)])
+
+    # *Работы
+    add_row([("*Работы", True, L), ("", False, C), ("", False, R),
+             ("руб./м2", False, R), ("", False, R)], shade=BLUE_HEADER)
+
+    # Вывоз песка
+    if include_sand_removal:
+        add_row([("Вывоз\\довоз песка", False, L), ("", False, C),
+                 ("", False, R), ("", False, R), ("5000", False, R)])
+
+    # Работа керамзит
+    if k:
+        add_row([("Устройство керамзитного основания", False, L), ("м2", False, C),
+                 (f"{ker_area}", False, R), (f"{k['keramzit_work_rate']}", False, R),
+                 (f"{k['keramzit_work_cost']}", False, R)])
+
+    # Работа стяжка
+    work_rate = w.get("rate", "").replace("₽", "")
+    add_row([("Устройство полусухой стяжки пола", False, L), ("м2", False, C),
+             (f"{area}", False, R), (work_rate, False, R), (f"{w['cost']}", False, R)])
+
+    # ИТОГО
+    grand = estimate["grand_total"]
+    if include_sand_removal:
+        grand += 5000
+    add_row([("", False, L), ("", False, C), ("", False, R),
+             ("ИТОГО стяжка", True, R), (f"{grand}", True, R)])
+
+    # Перемещаем таблицу после п.2.1
+    # python-docx добавляет таблицу в конец, нужно переместить
+    target_para = doc.paragraphs[target_idx]
+    target_para._p.addnext(table._tbl)
 
 
 def _replace_in_doc(doc, old_text, new_text):
@@ -228,6 +385,9 @@ def generate_contract(
     _replace_in_doc(doc, "(тысяч) рублей 00 копеек",
                     f"{total_formatted} ({total_words}) рублей 00 копеек")
 
+    # --- Вставка таблицы сметы после п.2.1 ---
+    _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, include_sand_removal)
+
     # Толщина п.2.5
     _replace_in_doc(doc, "средней толщине стяжки  мм", f"средней толщине стяжки {thickness} мм")
     _replace_in_doc(doc, "средней толщине стяжки мм", f"средней толщине стяжки {thickness} мм")
@@ -249,10 +409,20 @@ def generate_contract(
     _replace_in_doc(doc, "ФИО: ", f"ФИО: {full_name}")
     _replace_in_doc(doc, "Паспорт: ", f"Паспорт: {passport}")
     _replace_in_doc(doc, "Выдан: ", f"Выдан: {issued_by}")
-    _replace_in_doc(doc, "Дата выдачи: ", f"Дата выдачи: {passport_date}")
+    _replace_in_doc(doc, "Дата выдачи: ", f"Дата выдачи: {passport_date}\n\nЗарегистрирован по адресу:\n{reg_address}")
 
     # Подпись
     _replace_in_doc(doc, "( )", f"({short_name})")
+
+    # --- Разрыв страницы перед Приложением 1 ---
+    from docx.oxml.ns import qn as _qn
+    for i, para in enumerate(doc.paragraphs):
+        if "Приложение 1" in para.text and "ДОГОВОРУ" in para.text:
+            # Добавляем разрыв страницы перед этим параграфом
+            run = para.runs[0] if para.runs else para.add_run()
+            br = run._r.makeelement(_qn("w:br"), {_qn("w:type"): "page"})
+            run._r.insert(0, br)
+            break
 
     # --- Сохранение ---
     if output_path is None:
@@ -267,13 +437,18 @@ def generate_contract(
 # ---------- Тест ----------
 
 if __name__ == "__main__":
+    from calculator import calculate_estimate
+
     parsed = {
         "area_m2": 36.9,
         "thickness_mm_avg": 86,
         "address": "г. Нижний Новгород, ул. Политбойцов, д.19, кв. 19",
     }
 
-    estimate = {"grand_total": 75000}
+    estimate = calculate_estimate(
+        area_m2=36.9, thickness_mm=86, is_city=True,
+        grade="М150", floor=1,
+    )
 
     client_data = {
         "full_name": "Котелков Виктор Михайлович",
@@ -293,6 +468,6 @@ if __name__ == "__main__":
         parsed=parsed,
         estimate=estimate,
         client_data=client_data,
-        output_path="/home/claude/test_contract2.docx",
+        output_path="/home/claude/test_contract3.docx",
     )
     print(f"Договор: {path}")
