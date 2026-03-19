@@ -489,7 +489,7 @@ def calculate_estimate(
 # ============================================================
 
 def format_estimate(est: dict) -> str:
-    """Форматирует смету для отображения в Telegram."""
+    """Форматирует смету для отображения в Telegram. Порядок как в КП."""
     s = est["sand"]
     c = est["cement"]
     f = est["fiber"]
@@ -502,34 +502,37 @@ def format_estimate(est: dict) -> str:
     lines = [
         "💰 <b>СМЕТА:</b>",
         "",
-        f"🏗 <b>Работа ({w['floor_label']}):</b>",
-        f"    {w['rate']} = <b>{w['cost']:,}₽</b>",
-        "",
-        f"🪨 <b>Песок:</b> {s['sand_tons']}т ({s['transport']})",
+        "📦 <b>Материалы:</b>",
+        f"🪨 Песок: {s['sand_tons']}т ({s['transport']})",
         f"    Песок: {s['sand_cost']:,}₽ + доставка: {s['delivery']:,}₽ + {s['extra']:,}₽",
         f"    Итого: <b>{s['total']:,}₽</b>",
-        "",
-        f"🧱 <b>Цемент {c['grade']}:</b> {c['bags']} мешков",
+        f"🧱 Цемент {c['grade']}: {c['bags']} мешков",
         f"    Цемент: {c['cement_cost']:,}₽ + доставка: {c['delivery']:,}₽",
         f"    Итого: <b>{c['total']:,}₽</b>",
-        "",
         f"🧵 Фибра: {f['kg']}кг = {f['cost']:,}₽",
         f"📄 Плёнка техн.: {fl['m2']}м² = {fl['cost']:,}₽",
         f"🔇 Izoflex: {iz['meters']}м = {iz['cost']:,}₽",
     ]
 
     if k:
-        lines.append("")
-        lines.append(f"🟤 <b>Керамзитное основание:</b>")
-        lines.append(f"    Керамзит: {k['keramzit_bags']} мешков × 340₽ = {k['keramzit_cost']:,}₽")
+        lines.append(f"🟤 Керамзит: {k['keramzit_bags']} мешков × 340₽ = {k['keramzit_cost']:,}₽")
         lines.append(f"    Арм. плёнка: {k['reinforced_film_m2']}м² = {k['reinforced_film_cost']:,}₽")
         lines.append(f"    Мет. сетка: {k['mesh_m2']}м² = {k['mesh_cost']:,}₽")
-        lines.append(f"    Доставка: {k['delivery_total']:,}₽")
-        lines.append(f"    Работа керамзит: {k['keramzit_work_rate']}₽/м² = {k['keramzit_work_cost']:,}₽")
+        lines.append(f"    Доставка керамзит: {k['delivery_total']:,}₽")
 
+    lines.append(f"🚛 Доставка материалов: {c['delivery']:,}₽")
     lines.append(f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})")
+
     lines.append("")
     lines.append(f"📦 Материалы итого: <b>{est['materials_total']:,}₽</b>")
+
+    # Работы
+    lines.append("")
+    lines.append("🏗 <b>Работы:</b>")
+    if k:
+        lines.append(f"    Керамзитное основание: {k['keramzit_work_rate']}₽/м² = {k['keramzit_work_cost']:,}₽")
+    lines.append(f"    Стяжка ({w['floor_label']}): {w['rate']} = <b>{w['cost']:,}₽</b>")
+
     lines.append("")
     lines.append(f"═══════════════════")
 
