@@ -15,10 +15,11 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from parser import process_measurement, get_distance_km
+from parser import process_measurement, get_distance_km, parse_passport_photo, parse_passport_text
 from database import init_db, save_measurement, update_measurement_status, close_db
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 from kp_generator import generate_kp
+from contract_generator import generate_contract
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -236,6 +237,7 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
     # Сформировать КП — доступна только если выбран способ оплаты
     if payment:
         rows.append([InlineKeyboardButton(text="📄 Сформировать КП", callback_data="generate_kp")])
+        rows.append([InlineKeyboardButton(text="📋 Сформировать договор", callback_data="start_contract")])
 
     # Новый замер
     rows.append([InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")])
@@ -295,6 +297,26 @@ async def cmd_start(message: Message):
     )
 
 
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    """Обработка фото — для распознавания паспорта."""
+    user_id = message.from_user.id
+
+    if not is_allowed(user_id):
+        await message.answer("⛔ Доступ ограничен.")
+        return
+
+    st = user_state.get(user_id)
+
+    # Фото в контексте договора?
+    if st and st.get("contract_step", -1) >= 0:
+        handled = await handle_contract_input(message, st)
+        if handled:
+            return
+
+    await message.answer("📸 Фото получено, но сейчас я жду текст замера. Отправь текст.")
+
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     user_id = message.from_user.id
@@ -346,6 +368,12 @@ async def handle_text(message: Message):
         except ValueError:
             await message.answer("❌ Введи число (например: 7 или 12.5)")
             st["awaiting_custom_modifier"] = direction
+            return
+
+    # Ждём ввод данных для договора?
+    if st and st.get("contract_step", -1) >= 0:
+        handled = await handle_contract_input(message, st)
+        if handled:
             return
 
     # Обычный замер
@@ -588,6 +616,264 @@ async def on_generate_kp(callback: CallbackQuery):
 async def on_retry(callback: CallbackQuery):
     user_state.pop(callback.from_user.id, None)
     await callback.message.edit_text("🔄 Отправь текст замера заново.")
+    await callback.answer()
+
+
+# --- Договор: FSM ---
+
+CONTRACT_STEPS = [
+    ("passport_photo", "📸 Скинь <b>фото паспорта</b> или <b>напиши все данные текстом</b>\n(ФИО, серия/номер, кем выдан, дата выдачи, адрес прописки):"),
+    ("reg_address", "🏘 Скинь <b>фото прописки</b> или введи <b>адрес регистрации</b> текстом:"),
+    ("contract_number", "📄 Введи <b>номер договора</b> (только число, например: 48):"),
+    ("work_start", "🏗 Введи <b>дату начала работ</b> (ДД.ММ.ГГГГ):"),
+    ("payment_date", "💰 Введи <b>дату оплаты</b> (ДД.ММ.ГГГГ):"),
+]
+
+
+@dp.callback_query(F.data == "start_contract")
+async def on_start_contract(callback: CallbackQuery):
+    """Начинает сбор данных для договора."""
+    st = user_state.get(callback.from_user.id)
+    if not st or not st.get("estimate"):
+        await callback.answer("Сначала рассчитай смету.")
+        return
+
+    st["contract_step"] = 0
+    st["contract_data"] = {}
+
+    _, prompt = CONTRACT_STEPS[0]
+    await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
+    await callback.answer("Заполняем договор")
+
+
+async def handle_contract_input(message: Message, st: dict):
+    """Обрабатывает ввод данных для договора (текст или фото)."""
+    step_idx = st.get("contract_step", -1)
+    if step_idx < 0 or step_idx >= len(CONTRACT_STEPS):
+        return False
+
+    step_key, _ = CONTRACT_STEPS[step_idx]
+
+    # --- Шаг: фото паспорта ИЛИ текст ---
+    if step_key == "passport_photo":
+        result = None
+
+        if message.photo:
+            # Фото паспорта
+            processing = await message.answer("⏳ Распознаю паспорт...")
+            try:
+                photo = message.photo[-1]
+                file = await bot.get_file(photo.file_id)
+                photo_bytes = await bot.download_file(file.file_path)
+                data = photo_bytes.read()
+                result = await parse_passport_photo(data)
+            except Exception as e:
+                logger.error("Ошибка распознавания паспорта: %s", e, exc_info=True)
+                await processing.edit_text("❌ Ошибка. Попробуй другое фото или введи текстом.")
+                return True
+
+        elif message.text and message.text.strip():
+            # Текст с паспортными данными
+            processing = await message.answer("⏳ Распознаю данные...")
+            try:
+                result = await parse_passport_text(message.text.strip())
+            except Exception as e:
+                logger.error("Ошибка парсинга паспорта из текста: %s", e, exc_info=True)
+                await processing.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
+                return True
+        else:
+            await message.answer("📸 Скинь фото паспорта или напиши данные текстом.")
+            return True
+
+        if not result or result.get("error"):
+            await processing.edit_text("❌ Не удалось распознать. Попробуй другое фото или текстом.")
+            return True
+
+        st["contract_data"]["full_name"] = result.get("full_name", "")
+        series = result.get("passport_series", "")
+        number = result.get("passport_number", "")
+        st["contract_data"]["passport"] = f"{series} {number}"
+        st["contract_data"]["passport_issued"] = result.get("passport_issued_by", "")
+        st["contract_data"]["passport_date"] = result.get("passport_date", "")
+
+        if result.get("registration_address"):
+            st["contract_data"]["reg_address"] = result["registration_address"]
+
+        summary = (
+            "✅ <b>Распознано:</b>\n"
+            f"👤 {st['contract_data']['full_name']}\n"
+            f"🪪 {st['contract_data']['passport']}\n"
+            f"📝 {st['contract_data']['passport_issued']}\n"
+            f"📅 {st['contract_data']['passport_date']}"
+        )
+        if result.get("registration_address"):
+            summary += f"\n🏘 {result['registration_address']}"
+
+        await processing.edit_text(summary, parse_mode=ParseMode.HTML)
+
+        if result.get("registration_address"):
+            st["contract_step"] = 2  # contract_number
+        else:
+            st["contract_step"] = 1  # reg_address
+
+        _, prompt = CONTRACT_STEPS[st["contract_step"]]
+        await message.answer(prompt, parse_mode=ParseMode.HTML)
+        return True
+
+    # --- Шаг: адрес регистрации (фото прописки или текст) ---
+    if step_key == "reg_address":
+        if message.photo:
+            processing = await message.answer("⏳ Распознаю прописку...")
+            try:
+                photo = message.photo[-1]
+                file = await bot.get_file(photo.file_id)
+                photo_bytes = await bot.download_file(file.file_path)
+                data = photo_bytes.read()
+
+                result = await parse_passport_photo(data)
+                addr = result.get("registration_address")
+                if addr:
+                    st["contract_data"]["reg_address"] = addr
+                    await processing.edit_text(f"✅ Прописка: {addr}")
+                else:
+                    await processing.edit_text("❌ Не удалось распознать адрес. Введи текстом:")
+                    return True
+            except Exception as e:
+                logger.error("Ошибка распознавания прописки: %s", e, exc_info=True)
+                await processing.edit_text("❌ Ошибка. Введи адрес текстом:")
+                return True
+        else:
+            text = message.text.strip() if message.text else ""
+            if not text:
+                await message.answer("❌ Введи адрес регистрации или скинь фото прописки.")
+                return True
+            st["contract_data"]["reg_address"] = text
+
+        # Переходим к номеру договора
+        st["contract_step"] = 2
+        _, prompt = CONTRACT_STEPS[st["contract_step"]]
+        await message.answer(prompt, parse_mode=ParseMode.HTML)
+        return True
+
+    # --- Текстовые шаги ---
+    text = message.text.strip() if message.text else ""
+    if not text:
+        await message.answer("❌ Введи данные.")
+        return True
+
+    st["contract_data"][step_key] = text
+
+    # Следующий шаг
+    next_idx = step_idx + 1
+    if next_idx < len(CONTRACT_STEPS):
+        st["contract_step"] = next_idx
+        _, prompt = CONTRACT_STEPS[next_idx]
+        await message.answer(prompt, parse_mode=ParseMode.HTML)
+        return True
+
+    # Все данные собраны → подтверждение
+    st["contract_step"] = -1
+    cd = st["contract_data"]
+
+    summary = (
+        "📋 <b>Данные для договора:</b>\n\n"
+        f"👤 ФИО: {cd.get('full_name', '—')}\n"
+        f"🪪 Паспорт: {cd.get('passport', '—')}\n"
+        f"📝 Выдан: {cd.get('passport_issued', '—')}\n"
+        f"📅 Дата выдачи: {cd.get('passport_date', '—')}\n"
+        f"🏘 Регистрация: {cd.get('reg_address', '—')}\n"
+        f"📄 Договор №: {cd.get('contract_number', '—')}\n"
+        f"🏗 Начало работ: {cd.get('work_start', '—')}\n"
+        f"💰 Дата оплаты: {cd.get('payment_date', '—')}\n"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Всё верно → Договор", callback_data="confirm_contract"),
+            InlineKeyboardButton(text="🔄 Заново", callback_data="restart_contract"),
+        ]
+    ])
+
+    await message.answer(summary, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    return True
+
+
+@dp.callback_query(F.data == "confirm_contract")
+async def on_confirm_contract(callback: CallbackQuery):
+    """Генерирует договор."""
+    st = user_state.get(callback.from_user.id)
+    if not st or not st.get("contract_data"):
+        await callback.answer("Данные не найдены. Начни заново.")
+        return
+
+    await callback.answer("⏳ Генерирую договор...")
+
+    parsed = st["parsed"]
+    estimate = st["estimate"]
+    cd = st["contract_data"]
+
+    # Разбираем паспорт
+    passport_parts = cd["passport"].split()
+    series = passport_parts[0] if len(passport_parts) >= 1 else "____"
+    number = passport_parts[1] if len(passport_parts) >= 2 else "______"
+
+    client_data = {
+        "full_name": cd["full_name"],
+        "passport_series": series,
+        "passport_number": number,
+        "passport_issued_by": cd["passport_issued"],
+        "passport_date": cd["passport_date"],
+        "registration_address": cd["reg_address"],
+        "contract_number": cd["contract_number"],
+        "work_start_date": cd["work_start"] + "г.",
+        "work_end_date": cd["work_start"] + "г.",
+        "payment_date": cd["payment_date"] + "г",
+    }
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        msk = timezone(timedelta(hours=3))
+        ts = datetime.now(msk).strftime("%H%M%S")
+
+        name_short = cd["full_name"].split()[0] if cd["full_name"] else "клиент"
+        output_path = f"/tmp/Contract_{cd['contract_number']}_{name_short}_{ts}.docx"
+
+        generate_contract(
+            parsed=parsed,
+            estimate=estimate,
+            client_data=client_data,
+            grade=st.get("grade", "М150"),
+            include_sand_removal=st.get("sand_removal", False),
+            output_path=output_path,
+        )
+
+        doc_file = FSInputFile(
+            output_path,
+            filename=f"Договор_{cd['contract_number']}_{name_short}.docx"
+        )
+        await callback.message.answer_document(
+            doc_file,
+            caption=f"📋 Договор №{cd['contract_number']} — {cd['full_name']}"
+        )
+
+    except Exception as e:
+        logger.error("Ошибка генерации договора: %s", e, exc_info=True)
+        await callback.message.answer("❌ Ошибка генерации договора. Попробуй ещё раз.")
+
+
+@dp.callback_query(F.data == "restart_contract")
+async def on_restart_contract(callback: CallbackQuery):
+    """Начинает сбор данных заново."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    st["contract_step"] = 0
+    st["contract_data"] = {}
+
+    _, prompt = CONTRACT_STEPS[0]
+    await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 

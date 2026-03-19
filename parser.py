@@ -113,6 +113,121 @@ async def parse_measurement_text(text: str) -> dict:
 
 
 async def get_distance_km(lat: float, lon: float) -> dict:
+
+
+# ---------- ПАСПОРТ — распознавание фото ----------
+
+PASSPORT_PROMPT = """Ты — парсер паспорта РФ. Из фото паспорта извлеки данные и верни ТОЛЬКО валидный JSON.
+
+Формат ответа:
+{
+  "full_name": "Фамилия Имя Отчество",
+  "passport_series": "ХХХХ",
+  "passport_number": "ХХХХХХ",
+  "passport_issued_by": "кем выдан",
+  "passport_date": "ДД.ММ.ГГГГ",
+  "birth_date": "ДД.ММ.ГГГГ",
+  "registration_address": "адрес регистрации" или null
+}
+
+Правила:
+- full_name: Фамилия Имя Отчество — с большой буквы, в именительном падеже
+- passport_series: 4 цифры (может быть написано на боковой стороне: "22 17" → "2217")
+- passport_number: 6 цифр
+- passport_issued_by: полностью как написано (ГУ МВД, УФМС и т.д.)
+- passport_date: дата выдачи в формате ДД.ММ.ГГГГ
+- registration_address: если есть штамп прописки — извлеки адрес. Если нет — null
+- Если фото нечёткое и данные не читаются — верни что смог, остальное null
+- Не выдумывай данные. Извлекай только то, что видишь.
+"""
+
+
+import base64
+
+
+async def parse_passport_photo(photo_bytes: bytes, media_type: str = "image/jpeg") -> dict:
+    """
+    Отправляет фото паспорта в Claude Haiku Vision.
+    Возвращает словарь с извлечёнными данными.
+    """
+    try:
+        b64 = base64.b64encode(photo_bytes).decode("utf-8")
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": PASSPORT_PROMPT,
+                    },
+                ],
+            }],
+        )
+
+        raw = response.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0]
+
+        parsed = json.loads(raw)
+        logger.info("Паспорт (фото) распознан: %s", json.dumps(parsed, ensure_ascii=False))
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error("Паспорт: невалидный JSON: %s | raw: %s", e, raw)
+        return {"error": "parse_failed"}
+    except Exception as e:
+        logger.error("Паспорт: ошибка API: %s", e)
+        return {"error": "api_failed", "detail": str(e)}
+
+
+async def parse_passport_text(text: str) -> dict:
+    """
+    Парсит паспортные данные из текста менеджера.
+    Например: "Князев Сергей Николаевич 2221 309317 ГУ МВД по Нижегородской области 18.02.2022"
+    """
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=PASSPORT_PROMPT,
+            messages=[{"role": "user", "content": text}],
+        )
+
+        raw = response.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0]
+
+        parsed = json.loads(raw)
+        logger.info("Паспорт (текст) распознан: %s", json.dumps(parsed, ensure_ascii=False))
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error("Паспорт текст: невалидный JSON: %s | raw: %s", e, raw)
+        return {"error": "parse_failed"}
+    except Exception as e:
+        logger.error("Паспорт текст: ошибка API: %s", e)
+        return {"error": "api_failed", "detail": str(e)}
+
+
+# ---------- OSRM — расстояние по дороге (бесплатно) ----------
+
+
+async def get_distance_km(lat: float, lon: float) -> dict:
     """
     Считает расстояние по дороге от базы до объекта.
     OSRM (Open Source Routing Machine) — бесплатный, без ключа.
