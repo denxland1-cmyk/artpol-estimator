@@ -250,7 +250,7 @@ def generate_kp(
         ("мешок", False, C),
         (f"{c['bags']}", False, R),
         (f"{price_per_bag}", False, R),
-        (f"{c['total']}", False, R),
+        (f"{c['cement_cost']}", False, R),
     ])
 
     # Фибра

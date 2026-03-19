@@ -500,9 +500,7 @@ def format_estimate(est: dict) -> str:
         f"🪨 Песок: {s['sand_tons']}т ({s['transport']})",
         f"    Песок: {s['sand_cost']:,}₽ + доставка: {s['delivery']:,}₽ + {s['extra']:,}₽",
         f"    Итого: <b>{s['total']:,}₽</b>",
-        f"🧱 Цемент {c['grade']}: {c['bags']} мешков",
-        f"    Цемент: {c['cement_cost']:,}₽ + доставка: {c['delivery']:,}₽",
-        f"    Итого: <b>{c['total']:,}₽</b>",
+        f"🧱 Цемент {c['grade']}: {c['bags']} мешков = {c['cement_cost']:,}₽",
         f"🧵 Фибра: {f['kg']}кг = {f['cost']:,}₽",
         f"📄 Плёнка техн.: {fl['m2']}м² = {fl['cost']:,}₽",
         f"🔇 Izoflex: {iz['meters']}м = {iz['cost']:,}₽",
@@ -513,6 +511,7 @@ def format_estimate(est: dict) -> str:
         lines.append(f"    Арм. плёнка: {k['reinforced_film_m2']}м² = {k['reinforced_film_cost']:,}₽")
         lines.append(f"    Мет. сетка: {k['mesh_m2']}м² = {k['mesh_cost']:,}₽")
 
+    lines.append(f"🚛 Доставка материалов: {c['delivery']:,}₽")
     lines.append(f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})")
 
     lines.append("")
