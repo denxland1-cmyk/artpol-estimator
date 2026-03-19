@@ -402,6 +402,13 @@ def generate_kp(
             tcPr.append(vAlign)
 
     # --- Текст под таблицей ---
+
+    # Особые условия
+    special = parsed.get("special_conditions", [])
+    if special:
+        _add_para(doc, "Особые условия: " + ", ".join(special),
+                  bold=False, size=10, space_before=6, space_after=4)
+
     if include_sand_removal:
         _add_para(doc, "! Вывоз строительного мусора не входит в стоимость",
                   bold=True, size=10, space_before=4, space_after=2)
