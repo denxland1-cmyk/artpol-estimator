@@ -270,6 +270,48 @@ async def format_custom_fields() -> str:
     return "\n".join(lines)
 
 
+async def create_lead(name: str, price: int, status_id: int, custom_fields: list = None, phone: str = None, client_name: str = None) -> dict:
+    """Создаёт новую сделку + контакт."""
+    lead_data = [{
+        "name": name,
+        "price": price,
+        "status_id": status_id,
+        "pipeline_id": PIPELINE_ID,
+    }]
+    if custom_fields:
+        lead_data[0]["custom_fields_values"] = custom_fields
+
+    # Если есть телефон — создаём через complex (сделка + контакт)
+    if phone:
+        contact_name = client_name or name
+        complex_data = [{
+            "name": name,
+            "price": price,
+            "status_id": status_id,
+            "pipeline_id": PIPELINE_ID,
+            "custom_fields_values": custom_fields or [],
+            "_embedded": {
+                "contacts": [{
+                    "first_name": contact_name,
+                    "custom_fields_values": [{
+                        "field_code": "PHONE",
+                        "values": [{"value": phone}],
+                    }],
+                }],
+            },
+        }]
+        result = await _amo_post("/leads/complex", complex_data)
+        if not result.get("error"):
+            # complex возвращает список ID
+            lead_ids = result if isinstance(result, list) else result.get("_embedded", {}).get("leads", [])
+            if lead_ids:
+                lead_id = lead_ids[0].get("id") if isinstance(lead_ids[0], dict) else lead_ids[0]
+                return {"success": True, "lead_id": lead_id}
+        return result
+
+    return await _amo_post("/leads", lead_data)
+
+
 # ========== Основная функция: заполнить AMO ==========
 
 async def fill_amo_lead(
@@ -283,21 +325,14 @@ async def fill_amo_lead(
     object_type: str,
     measurement_datetime: str,
     measurement_timestamp: int = None,
+    client_name: str = "",
 ) -> dict:
     """
     Находит сделку по телефону и заполняет данные.
-    Двигает из "Замер состоялся" → "Сделано предложение".
+    Если не найдена — создаёт новую.
+    Двигает в "Сделано предложение".
     """
-    # 1. Ищем сделку
-    lead = await find_lead_by_phone(phone)
-    if not lead:
-        return {"error": "not_found", "detail": f"Сделка с телефоном {phone} не найдена в AMO"}
-
-    lead_id = lead["id"]
-    lead_name = lead.get("name", "")
-    logger.info("AMO: нашли сделку #%s '%s'", lead_id, lead_name)
-
-    # 2. Формируем кастомные поля
+    # 1. Формируем кастомные поля
     custom_fields = [
         {"field_id": FIELD_AREA, "values": [{"value": area}]},
         {"field_id": FIELD_FLOOR, "values": [{"value": floor}]},
@@ -307,22 +342,57 @@ async def fill_amo_lead(
         {"field_id": FIELD_INFO, "values": [{"value": raw_text}]},
     ]
 
-    # Дата и время замера (unix timestamp)
     if measurement_timestamp:
         custom_fields.append(
             {"field_id": FIELD_MEASUREMENT_DT, "values": [{"value": measurement_timestamp}]}
         )
 
-    # 3. Обновляем сделку: бюджет + статус + поля
-    update_result = await update_lead(
-        lead_id=lead_id,
-        price=price,
-        status_id=STATUS_OFFER_MADE,
-        custom_fields=custom_fields,
-    )
+    # 2. Ищем сделку
+    lead = await find_lead_by_phone(phone)
+    created_new = False
 
-    if update_result.get("error"):
-        return {"error": "update_failed", "detail": str(update_result)}
+    if lead:
+        lead_id = lead["id"]
+        lead_name = lead.get("name", "")
+        logger.info("AMO: нашли сделку #%s '%s'", lead_id, lead_name)
+
+        # 3a. Обновляем существующую
+        update_result = await update_lead(
+            lead_id=lead_id,
+            price=price,
+            status_id=STATUS_OFFER_MADE,
+            custom_fields=custom_fields,
+        )
+        if update_result.get("error"):
+            return {"error": "update_failed", "detail": str(update_result)}
+    else:
+        # 3b. Создаём новую сделку
+        lead_name = f"{client_name} {phone}" if client_name else phone
+        logger.info("AMO: сделка не найдена, создаём новую '%s'", lead_name)
+
+        create_result = await create_lead(
+            name=lead_name,
+            price=price,
+            status_id=STATUS_OFFER_MADE,
+            custom_fields=custom_fields,
+            phone=phone,
+            client_name=client_name,
+        )
+
+        if create_result.get("error"):
+            return {"error": "create_failed", "detail": str(create_result)}
+
+        lead_id = create_result.get("lead_id")
+        if not lead_id:
+            # Пробуем извлечь из ответа
+            embedded = create_result.get("_embedded", {})
+            leads = embedded.get("leads", [])
+            lead_id = leads[0]["id"] if leads else None
+
+        if not lead_id:
+            return {"error": "create_failed", "detail": "Не удалось получить ID новой сделки"}
+
+        created_new = True
 
     # 4. Примечание с замером
     note_text = (
@@ -336,10 +406,12 @@ async def fill_amo_lead(
     )
     await add_note_to_lead(lead_id, note_text)
 
-    logger.info("AMO: сделка #%s обновлена → 'Сделано предложение', бюджет %s₽", lead_id, price)
+    action = "создана" if created_new else "обновлена"
+    logger.info("AMO: сделка #%s %s → 'Сделано предложение', бюджет %s₽", lead_id, action, price)
 
     return {
         "success": True,
         "lead_id": lead_id,
         "lead_name": lead_name,
+        "created_new": created_new,
     }

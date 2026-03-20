@@ -388,9 +388,29 @@ async def handle_text(message: Message):
 
     # Ждём ввод данных для договора?
     if st and st.get("contract_step", -1) >= 0:
-        handled = await handle_contract_input(message, st)
-        if handled:
+        # Проверяем — может это замер, а не данные для договора?
+        text = message.text or ""
+        looks_like_measurement = (
+            len(text) > 60
+            and any(x in text.lower() for x in ["м2", "мм", "м²", "квартир", "этаж", "площад", "слой", "стяжк"])
+        )
+
+        if text.strip().lower() in ("/cancel", "отмена", "отменить"):
+            st["contract_step"] = -1
+            st.pop("contract_data", None)
+            await message.answer("❌ Создание договора отменено. Отправь новый замер.")
             return
+
+        if looks_like_measurement:
+            # Это замер, а не паспортные данные — сбрасываем FSM
+            st["contract_step"] = -1
+            st.pop("contract_data", None)
+            await message.answer("📝 Похоже на замер — отменяю создание договора.")
+            # Не return — пусть пойдёт дальше как обычный замер
+        else:
+            handled = await handle_contract_input(message, st)
+            if handled:
+                return
 
     # Ждём дополнение данных замера?
     if st and st.get("awaiting_supplement"):
@@ -755,6 +775,7 @@ async def on_fill_amo(callback: CallbackQuery):
         object_type=parsed.get("object_type", ""),
         measurement_datetime=measurement_dt,
         measurement_timestamp=measurement_ts,
+        client_name=parsed.get("client_name", ""),
     )
 
     if result.get("success"):
@@ -783,8 +804,9 @@ async def on_fill_amo(callback: CallbackQuery):
         if files_sent:
             files_info = f"\n📎 Прикреплено: {', '.join(files_sent)}"
 
+        action = "✨ Создана новая" if result.get("created_new") else "🔄 Обновлена"
         await processing.edit_text(
-            f"✅ <b>АМО обновлена!</b>\n\n"
+            f"✅ <b>АМО {action.split()[1]}!</b>\n\n"
             f"📊 Сделка: {result['lead_name']}\n"
             f"💰 Бюджет: {total:,}₽\n"
             f"📍 Статус: → Сделано предложение{files_info}",
@@ -792,8 +814,7 @@ async def on_fill_amo(callback: CallbackQuery):
         )
     elif result.get("error") == "not_found":
         await processing.edit_text(
-            f"❌ Сделка с телефоном {phone} не найдена в АМО.\n"
-            f"Проверь что сделка существует и номер в названии совпадает."
+            f"❌ Сделка с телефоном {phone} не найдена и не удалось создать новую."
         )
     else:
         await processing.edit_text(
@@ -839,7 +860,7 @@ async def on_start_contract(callback: CallbackQuery):
     st["contract_data"] = {}
 
     _, prompt = CONTRACT_STEPS[0]
-    await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
+    await callback.message.answer(prompt + "\n\n<i>Напиши «отмена» чтобы вернуться к замерам</i>", parse_mode=ParseMode.HTML)
     await callback.answer("Заполняем договор")
 
 
