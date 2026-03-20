@@ -966,13 +966,23 @@ async def handle_contract_input(message: Message, st: dict):
             _, prompt = CONTRACT_STEPS[st["contract_step"]]
             await message.answer(prompt, parse_mode=ParseMode.HTML)
         else:
-            # Прописки нет — спрашиваем
+            # Прописки нет — ждём 3 сек (может идёт второе фото из media group)
             st["contract_step"] = 1  # если кинут фото — обработается как прописка
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Без прописки", callback_data="skip_registration")],
-                [InlineKeyboardButton(text="📸 Добавить прописку", callback_data="add_registration")],
-            ])
-            await message.answer("Прописка не найдена на фото.", reply_markup=kb)
+            import asyncio
+            await asyncio.sleep(3)
+
+            # Проверяем — может за это время второе фото уже заполнило прописку?
+            if st["contract_data"].get("reg_address"):
+                # Прописка уже заполнена вторым фото — переходим дальше
+                st["contract_step"] = 2
+                _, prompt = CONTRACT_STEPS[st["contract_step"]]
+                await message.answer(prompt, parse_mode=ParseMode.HTML)
+            else:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Без прописки", callback_data="skip_registration")],
+                    [InlineKeyboardButton(text="📸 Добавить прописку", callback_data="add_registration")],
+                ])
+                await message.answer("Прописка не найдена на фото.", reply_markup=kb)
 
         return True
 
