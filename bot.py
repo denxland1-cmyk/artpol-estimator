@@ -505,19 +505,35 @@ async def on_confirm(callback: CallbackQuery):
     await update_measurement_status(st["db_id"], "confirmed")
 
     parsed = st["parsed"]
-    is_city = parsed.get("location_type") != "за городом"
     st["floor"] = extract_floor(parsed)
 
-    # Расстояния
+    # Расстояния — считаем ВСЕГДА если есть координаты
     st["dist_equipment"] = 0
     st["dist_materials"] = 0
-    if not is_city:
-        coords = parsed.get("coordinates")
-        if coords and coords.get("lat") and coords.get("lon"):
-            dist_info = parsed.get("distance", {})
-            if isinstance(dist_info, dict) and dist_info.get("distance_km"):
-                st["dist_equipment"] = dist_info["distance_km"]
-            st["dist_materials"] = await get_materials_distance(coords["lat"], coords["lon"])
+    coords = parsed.get("coordinates")
+    if coords and coords.get("lat") and coords.get("lon"):
+        dist_info = parsed.get("distance", {})
+        if isinstance(dist_info, dict) and dist_info.get("distance_km"):
+            st["dist_equipment"] = dist_info["distance_km"]
+        st["dist_materials"] = await get_materials_distance(coords["lat"], coords["lon"])
+
+    # Город = только НН и расстояние ≤ 20 км от базы
+    # Всё что дальше 20 км — область (по километражу)
+    max_dist = max(st["dist_equipment"], st["dist_materials"])
+    if max_dist > 20:
+        parsed["location_type"] = "за городом"
+        logger.info("Расстояние %.1f км > 20 км → считаем как область", max_dist)
+    elif max_dist == 0 and parsed.get("location_type") == "за городом":
+        pass  # нет координат, верим парсеру
+    elif max_dist == 0:
+        pass  # город без координат — ОК
+
+    is_city = parsed.get("location_type") != "за городом"
+
+    # Если город — обнуляем расстояния (фикс доставка)
+    if is_city:
+        st["dist_equipment"] = 0
+        st["dist_materials"] = 0
 
     # Керамзит
     keramzit_data = parsed.get("keramzit") or {}

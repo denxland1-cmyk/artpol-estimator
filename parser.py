@@ -63,7 +63,7 @@ PARSER_SYSTEM_PROMPT = """\
   Вместо этого ОБЯЗАТЕЛЬНО добавь в special_conditions запись БОЛЬШИМИ БУКВАМИ, например:
   "САНУЗЕЛ 1 ЭТАЖ: УРОВЕНЬ СТЯЖКИ -10 ММ ОТ УРОВНЯ ЭТАЖА"
 - object_type: определи по контексту (квартира, частный дом, коммерческое помещение)
-- location_type: "город" если ЖК, улица в Нижнем Новгороде; "за городом" если деревня, посёлок, коттеджный посёлок
+- location_type: "город" ТОЛЬКО если адрес в Нижнем Новгороде (ЖК, улица в НН). Все остальные города и населённые пункты (Дзержинск, Балахна, Кстово, Бор, Богородск и т.д.) — это "за городом". Деревня, посёлок, коттеджный посёлок — тоже "за городом"
 - floor: номер этажа объекта (число). ВАЖНО: в адресах формат ВСЕГДА такой: улица, дом, квартира, этаж. После номера дома ВСЕГДА идёт номер квартиры, а потом этаж. Пример: "Ленина 53к1 63 эт 1" означает дом 53 корпус 1, квартира 63, этаж 1. НЕ ПУТАЙ квартиру с этажом! Этаж — это число после "эт"/"этаж". Если этаж не указан — null.
 - warm_floor: true если упоминается тёплый пол, иначе false; null если неясно
 - deadline: сроки как строка (например "к 20 марта", "срочно", "на следующей неделе")
@@ -315,16 +315,15 @@ async def process_measurement(text: str) -> dict:
 
     parsed["missing_fields"] = missing
 
-    # --- Если за городом — считаем расстояние ---
-    if parsed.get("location_type") == "за городом":
-        coords = parsed.get("coordinates")
-        if coords and coords.get("lat") and coords.get("lon"):
-            distance = await get_distance_km(coords["lat"], coords["lon"])
-            parsed["distance"] = distance
-        else:
-            parsed["distance"] = None
-            if "координаты объекта" not in missing:
-                missing.append("координаты объекта")
+    # --- Считаем расстояние ВСЕГДА если есть координаты ---
+    coords = parsed.get("coordinates")
+    if coords and coords.get("lat") and coords.get("lon"):
+        distance = await get_distance_km(coords["lat"], coords["lon"])
+        parsed["distance"] = distance
+    else:
+        parsed["distance"] = None
+        if parsed.get("location_type") == "за городом" and "координаты объекта" not in missing:
+            missing.append("координаты объекта")
 
     return parsed
 
