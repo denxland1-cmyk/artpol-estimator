@@ -911,6 +911,20 @@ async def handle_contract_input(message: Message, st: dict):
         pi = result.get("passport_issued_by") or ""
 
         if not fn or not ps or not pn or not pi:
+            # Может это второе фото (прописка) из media group?
+            if st["contract_data"].get("full_name") and result.get("registration_address"):
+                # Паспорт уже распознан, это фото прописки
+                st["contract_data"]["reg_address"] = result["registration_address"]
+                await processing.edit_text(
+                    f"✅ Прописка: {result['registration_address']}",
+                    parse_mode=ParseMode.HTML,
+                )
+                st["contract_step"] = 2  # contract_number
+                _, prompt = CONTRACT_STEPS[st["contract_step"]]
+                await message.answer(prompt, parse_mode=ParseMode.HTML)
+                return True
+
+            # Если паспорт ещё не распознан — ждём нормальное фото
             missing = []
             if not fn:
                 missing.append("ФИО")
