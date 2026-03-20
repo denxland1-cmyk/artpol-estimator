@@ -392,6 +392,55 @@ async def handle_text(message: Message):
         if handled:
             return
 
+    # Ждём дополнение данных замера?
+    if st and st.get("awaiting_supplement"):
+        st.pop("awaiting_supplement")
+        processing_msg = await message.answer("⏳ Дополняю данные замера...")
+
+        try:
+            # Парсим дополнение
+            supplement = await process_measurement(message.text)
+            if supplement.get("error"):
+                await processing_msg.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
+                st["awaiting_supplement"] = True
+                return
+
+            # Объединяем: новые данные перезаписывают только пустые поля
+            old = st["parsed"]
+            for key, val in supplement.items():
+                if key in ("missing_fields", "error", "raw_response"):
+                    continue
+                if val is None or val == "" or val == [] or val == {}:
+                    continue
+                # Перезаписываем только если старое значение пустое
+                old_val = old.get(key)
+                if old_val is None or old_val == "" or old_val == [] or old_val == {}:
+                    old[key] = val
+
+            # Пересчитываем missing_fields
+            required = []
+            if not old.get("client_name") and not old.get("client_phone"):
+                required.append("имя или телефон клиента")
+            if not old.get("area_m2"):
+                required.append("площадь (м²)")
+            if not old.get("thickness_mm_avg") and not old.get("zones"):
+                required.append("толщина слоя (мм)")
+            if not old.get("object_type"):
+                required.append("тип объекта")
+            if not old.get("location_type"):
+                required.append("город или за городом")
+            old["missing_fields"] = required if required else []
+
+            text = format_parsed_result(old, db_id=st["db_id"], created_at=st["created_at"])
+            has_missing = bool(old.get("missing_fields"))
+            keyboard = get_parse_keyboard(has_missing)
+
+            await processing_msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception as e:
+            logger.error("Ошибка дополнения: %s", e, exc_info=True)
+            await processing_msg.edit_text("❌ Ошибка. Попробуй ещё раз.")
+        return
+
     # Обычный замер
     processing_msg = await message.answer("⏳ Распознаю данные замера...")
 
@@ -1034,6 +1083,7 @@ async def on_fill_missing(callback: CallbackQuery):
         await callback.answer("Нет недостающих полей.")
         return
     missing = st["parsed"]["missing_fields"]
+    st["awaiting_supplement"] = True  # ждём дополнение
     await callback.message.answer(
         "📝 <b>Допиши недостающие данные одним сообщением:</b>\n"
         + "\n".join(f"  • {f}" for f in missing),
