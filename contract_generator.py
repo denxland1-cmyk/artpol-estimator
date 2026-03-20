@@ -369,7 +369,7 @@ def generate_contract(
     _replace_in_doc(doc, "«  » января 2026 г.", date_header)
 
     # ФИО клиента (в шапке после "и")
-    _replace_in_doc(doc, ", именуемая в дальнейшем", f" {full_name}, именуемая в дальнейшем")
+    _replace_in_doc(doc, ", именуемая в дальнейшем", f" {full_name}, именуемый(ая) в дальнейшем")
 
     # Адрес объекта
     _replace_in_doc(doc, "г. Нижний Новгород, ул. Норильская, д. 16, кв. 5", address)
