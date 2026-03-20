@@ -907,6 +907,27 @@ async def handle_contract_input(message: Message, st: dict):
             await processing.edit_text("❌ Не удалось распознать. Попробуй другое фото или текстом.")
             return True
 
+        # Проверяем что ключевые поля заполнены
+        fn = result.get("full_name") or ""
+        ps = result.get("passport_series") or ""
+        pn = result.get("passport_number") or ""
+        pi = result.get("passport_issued_by") or ""
+
+        if not fn or not ps or not pn or not pi:
+            missing = []
+            if not fn:
+                missing.append("ФИО")
+            if not ps or not pn:
+                missing.append("серия/номер паспорта")
+            if not pi:
+                missing.append("кем выдан")
+            await processing.edit_text(
+                "⚠️ Не хватает данных: " + ", ".join(missing) + "\n\n"
+                "Введи все данные:\n"
+                "ФИО, серия номер, кем выдан, дата выдачи, адрес прописки"
+            )
+            return True
+
         st["contract_data"]["full_name"] = result.get("full_name", "")
         series = result.get("passport_series", "")
         number = result.get("passport_number", "")
@@ -976,7 +997,10 @@ async def handle_contract_input(message: Message, st: dict):
     # --- Текстовые шаги ---
     text = message.text.strip() if message.text else ""
     if not text:
-        await message.answer("❌ Введи данные.")
+        if message.photo:
+            await message.answer("📸 Сейчас жду текст, а не фото. Введи данные текстом.")
+        else:
+            await message.answer("❌ Введи данные.")
         return True
 
     st["contract_data"][step_key] = text
