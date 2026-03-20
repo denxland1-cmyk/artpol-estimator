@@ -874,18 +874,93 @@ async def handle_contract_input(message: Message, st: dict):
         result = None
 
         if message.photo:
-            # Фото паспорта
-            processing = await message.answer("⏳ Распознаю паспорт...")
-            try:
-                photo = message.photo[-1]
-                file = await bot.get_file(photo.file_id)
-                photo_bytes = await bot.download_file(file.file_path)
-                data = photo_bytes.read()
-                result = await parse_passport_photo(data)
-            except Exception as e:
-                logger.error("Ошибка распознавания паспорта: %s", e, exc_info=True)
-                await processing.edit_text("❌ Ошибка. Попробуй другое фото или введи текстом.")
+            # Буферизируем фото — может прийти media group (2 фото)
+            if "photo_buffer" not in st:
+                st["photo_buffer"] = []
+
+            photo = message.photo[-1]
+            file = await bot.get_file(photo.file_id)
+            photo_bytes = await bot.download_file(file.file_path)
+            data = photo_bytes.read()
+            st["photo_buffer"].append(data)
+
+            # Если это второе+ фото — просто добавляем и выходим (первое обработает)
+            if len(st["photo_buffer"]) > 1:
                 return True
+
+            # Первое фото — ждём 2.5 сек на случай media group
+            import asyncio
+            await asyncio.sleep(2.5)
+
+            # Обрабатываем все фото из буфера
+            photos = st.pop("photo_buffer", [])
+            processing = await message.answer(f"⏳ Распознаю паспорт ({len(photos)} фото)...")
+
+            passport_result = None
+            registration = None
+
+            for photo_data in photos:
+                try:
+                    r = await parse_passport_photo(photo_data)
+                    if r.get("error"):
+                        continue
+
+                    fn = r.get("full_name") or ""
+                    ps = r.get("passport_series") or ""
+
+                    if fn and ps:
+                        # Это паспорт
+                        passport_result = r
+                    if r.get("registration_address"):
+                        registration = r["registration_address"]
+                except Exception as e:
+                    logger.error("Ошибка распознавания фото: %s", e)
+
+            if not passport_result:
+                await processing.edit_text(
+                    "❌ Не удалось распознать паспорт.\n"
+                    "Скинь фото чётче или введи данные текстом."
+                )
+                return True
+
+            st["contract_data"]["full_name"] = passport_result.get("full_name", "")
+            series = passport_result.get("passport_series", "")
+            number = passport_result.get("passport_number", "")
+            st["contract_data"]["passport"] = f"{series} {number}"
+            st["contract_data"]["passport_issued"] = passport_result.get("passport_issued_by", "")
+            st["contract_data"]["passport_date"] = passport_result.get("passport_date", "")
+
+            # Прописка — из паспорта или из отдельного фото
+            if not registration and passport_result.get("registration_address"):
+                registration = passport_result["registration_address"]
+            if registration:
+                st["contract_data"]["reg_address"] = registration
+
+            summary = (
+                "✅ <b>Распознано:</b>\n"
+                f"👤 {st['contract_data']['full_name']}\n"
+                f"🪪 {st['contract_data']['passport']}\n"
+                f"📝 {st['contract_data']['passport_issued']}\n"
+                f"📅 {st['contract_data']['passport_date']}"
+            )
+            if registration:
+                summary += f"\n🏘 {registration}"
+
+            await processing.edit_text(summary, parse_mode=ParseMode.HTML)
+
+            if registration:
+                st["contract_step"] = 2  # contract_number
+                _, prompt = CONTRACT_STEPS[st["contract_step"]]
+                await message.answer(prompt, parse_mode=ParseMode.HTML)
+            else:
+                st["contract_step"] = 1
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Без прописки", callback_data="skip_registration")],
+                    [InlineKeyboardButton(text="📸 Добавить прописку", callback_data="add_registration")],
+                ])
+                await message.answer("Прописка не найдена.", reply_markup=kb)
+
+            return True
 
         elif message.text and message.text.strip():
             # Текст с паспортными данными
@@ -896,95 +971,60 @@ async def handle_contract_input(message: Message, st: dict):
                 logger.error("Ошибка парсинга паспорта из текста: %s", e, exc_info=True)
                 await processing.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
                 return True
-        else:
-            await message.answer("📸 Скинь фото паспорта или напиши данные текстом.")
-            return True
 
-        if not result or result.get("error"):
-            await processing.edit_text("❌ Не удалось распознать. Попробуй другое фото или текстом.")
-            return True
-
-        # Проверяем что ключевые поля заполнены
-        fn = result.get("full_name") or ""
-        ps = result.get("passport_series") or ""
-        pn = result.get("passport_number") or ""
-        pi = result.get("passport_issued_by") or ""
-
-        if not fn or not ps or not pn or not pi:
-            # Может это второе фото (прописка) из media group?
-            if st["contract_data"].get("full_name") and result.get("registration_address"):
-                # Паспорт уже распознан, это фото прописки
-                st["contract_data"]["reg_address"] = result["registration_address"]
-                await processing.edit_text(
-                    f"✅ Прописка: {result['registration_address']}",
-                    parse_mode=ParseMode.HTML,
-                )
-                st["contract_step"] = 2  # contract_number
-                _, prompt = CONTRACT_STEPS[st["contract_step"]]
-                await message.answer(prompt, parse_mode=ParseMode.HTML)
+            if not result or result.get("error"):
+                await processing.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
                 return True
 
-            # Если паспорт ещё не распознан — ждём нормальное фото
-            missing = []
-            if not fn:
-                missing.append("ФИО")
-            if not ps or not pn:
-                missing.append("серия/номер паспорта")
-            if not pi:
-                missing.append("кем выдан")
-            await processing.edit_text(
-                "⚠️ Не хватает данных: " + ", ".join(missing) + "\n\n"
-                "Введи все данные:\n"
-                "ФИО, серия номер, кем выдан, дата выдачи, адрес прописки"
+            fn = result.get("full_name") or ""
+            ps = result.get("passport_series") or ""
+            pn = result.get("passport_number") or ""
+            pi = result.get("passport_issued_by") or ""
+
+            if not fn or not ps or not pn or not pi:
+                missing = []
+                if not fn: missing.append("ФИО")
+                if not ps or not pn: missing.append("серия/номер паспорта")
+                if not pi: missing.append("кем выдан")
+                await processing.edit_text(
+                    "⚠️ Не хватает данных: " + ", ".join(missing) + "\n\n"
+                    "Введи все данные:\nФИО, серия номер, кем выдан, дата выдачи, адрес прописки"
+                )
+                return True
+
+            st["contract_data"]["full_name"] = fn
+            st["contract_data"]["passport"] = f"{ps} {pn}"
+            st["contract_data"]["passport_issued"] = pi
+            st["contract_data"]["passport_date"] = result.get("passport_date", "")
+
+            reg = result.get("registration_address")
+            if reg:
+                st["contract_data"]["reg_address"] = reg
+
+            summary = (
+                "✅ <b>Распознано:</b>\n"
+                f"👤 {fn}\n🪪 {ps} {pn}\n📝 {pi}\n📅 {result.get('passport_date', '')}"
             )
-            return True
+            if reg:
+                summary += f"\n🏘 {reg}"
+            await processing.edit_text(summary, parse_mode=ParseMode.HTML)
 
-        st["contract_data"]["full_name"] = result.get("full_name", "")
-        series = result.get("passport_series", "")
-        number = result.get("passport_number", "")
-        st["contract_data"]["passport"] = f"{series} {number}"
-        st["contract_data"]["passport_issued"] = result.get("passport_issued_by", "")
-        st["contract_data"]["passport_date"] = result.get("passport_date", "")
-
-        if result.get("registration_address"):
-            st["contract_data"]["reg_address"] = result["registration_address"]
-
-        summary = (
-            "✅ <b>Распознано:</b>\n"
-            f"👤 {st['contract_data']['full_name']}\n"
-            f"🪪 {st['contract_data']['passport']}\n"
-            f"📝 {st['contract_data']['passport_issued']}\n"
-            f"📅 {st['contract_data']['passport_date']}"
-        )
-        if result.get("registration_address"):
-            summary += f"\n🏘 {result['registration_address']}"
-
-        await processing.edit_text(summary, parse_mode=ParseMode.HTML)
-
-        if result.get("registration_address"):
-            st["contract_step"] = 2  # contract_number
-            _, prompt = CONTRACT_STEPS[st["contract_step"]]
-            await message.answer(prompt, parse_mode=ParseMode.HTML)
-        else:
-            # Прописки нет — ждём 3 сек (может идёт второе фото из media group)
-            st["contract_step"] = 1  # если кинут фото — обработается как прописка
-            import asyncio
-            await asyncio.sleep(3)
-
-            # Проверяем — может за это время второе фото уже заполнило прописку?
-            if st["contract_data"].get("reg_address"):
-                # Прописка уже заполнена вторым фото — переходим дальше
+            if reg:
                 st["contract_step"] = 2
                 _, prompt = CONTRACT_STEPS[st["contract_step"]]
                 await message.answer(prompt, parse_mode=ParseMode.HTML)
             else:
+                st["contract_step"] = 1
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✅ Без прописки", callback_data="skip_registration")],
                     [InlineKeyboardButton(text="📸 Добавить прописку", callback_data="add_registration")],
                 ])
-                await message.answer("Прописка не найдена на фото.", reply_markup=kb)
+                await message.answer("Прописка не найдена.", reply_markup=kb)
+            return True
 
-        return True
+        else:
+            await message.answer("📸 Скинь фото паспорта или напиши данные текстом.")
+            return True
 
     # --- Шаг: адрес регистрации (фото прописки или текст) ---
     if step_key == "reg_address":
