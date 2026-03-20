@@ -20,6 +20,7 @@ from database import init_db, save_measurement, update_measurement_status, close
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 from kp_generator import generate_kp
 from contract_generator import generate_contract
+from amo_crm import format_pipelines, format_custom_fields
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -298,6 +299,17 @@ async def cmd_start(message: Message):
         "ЖК Анкудиновский, слой 50мм, тёплый пол</i>",
         parse_mode=ParseMode.HTML,
     )
+
+
+@dp.message(F.text == "/amo")
+async def cmd_amo(message: Message):
+    """Показывает воронки и кастомные поля AMO CRM."""
+    if not is_allowed(message.from_user.id):
+        return
+    msg = await message.answer("⏳ Загружаю данные из AMO CRM...")
+    pipelines = await format_pipelines()
+    fields = await format_custom_fields()
+    await msg.edit_text(pipelines + "\n\n" + fields, parse_mode=ParseMode.HTML)
 
 
 @dp.message(F.photo)
