@@ -193,42 +193,50 @@ async def add_note_to_lead(lead_id: int, text: str) -> dict:
 
 
 async def upload_file_to_lead(lead_id: int, file_path: str, filename: str) -> dict:
-    """Загружает файл и прикрепляет как примечание к сделке."""
+    """Загружает файл в Yandex S3 и прикрепляет ссылку к сделке."""
     import os
     if not os.path.exists(file_path):
         logger.error("AMO upload: файл не найден %s", file_path)
         return {"error": "file_not_found"}
 
     try:
-        # Загружаем файл через AMO Drive API
-        async with httpx.AsyncClient(timeout=30) as http:
-            with open(file_path, "rb") as f:
-                files = {"file": (filename, f, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
-                resp = await http.post(
-                    f"https://{AMO_DOMAIN}/api/v4/leads/{lead_id}/files",
-                    headers={"Authorization": f"Bearer {AMO_TOKEN}"},
-                    files=files,
-                )
+        import boto3
+        from botocore.config import Config
 
-            if resp.status_code in (200, 201):
-                logger.info("AMO: файл '%s' прикреплён к сделке #%s", filename, lead_id)
-                return resp.json() if resp.text else {"success": True}
-            else:
-                logger.warning("AMO upload status %s, пробуем через примечание", resp.status_code)
+        s3 = boto3.client(
+            "s3",
+            endpoint_url="https://storage.yandexcloud.net",
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+            config=Config(signature_version="s3v4"),
+            region_name="ru-central1",
+        )
 
-        # Fallback: добавляем как примечание с упоминанием файла
+        bucket = os.environ.get("S3_BUCKET", "artpol-docs")
+        s3_key = f"docs/{filename}"
+
+        s3.upload_file(
+            file_path, bucket, s3_key,
+            ExtraArgs={"ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        )
+
+        public_url = f"https://{bucket}.storage.yandexcloud.net/{s3_key}"
+        logger.info("S3: файл загружен → %s", public_url)
+
+        # Прикрепляем ссылку как примечание к сделке
         note_data = [{
             "entity_id": lead_id,
             "note_type": "common",
             "params": {
-                "text": f"📎 Документ: {filename} (отправлен через бота)",
+                "text": f"📎 {filename}\n{public_url}",
             },
         }]
         await _amo_post(f"/leads/{lead_id}/notes", note_data)
-        return {"success": True, "method": "note"}
+
+        return {"success": True, "url": public_url}
 
     except Exception as e:
-        logger.error("AMO upload error: %s", e)
+        logger.error("S3/AMO upload error: %s", e, exc_info=True)
         return {"error": str(e)}
 
 
