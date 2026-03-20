@@ -642,7 +642,7 @@ CONTRACT_STEPS = [
     ("contract_number", "📄 Введи <b>номер договора</b> (только число, например: 48):"),
     ("work_start", "🏗 Введи <b>дату начала работ</b> (ДД.ММ.ГГГГ):"),
     ("work_end", "🏗 Введи <b>дату окончания работ</b> (ДД.ММ.ГГГГ):"),
-    ("payment_date", "💰 Введи <b>дату оплаты</b> (ДД.ММ.ГГГГ):"),
+    ("payment_terms", "💰 Введи <b>условия оплаты</b> (свободный текст, например: «Аванс 26.03.2026 - 50000 руб. Окончательный расчет 30.03.2026 - 60000 руб.» или «Рассрочка: 1 апреля 30000, 1 мая 30000»):"),
 ]
 
 
@@ -801,7 +801,7 @@ async def handle_contract_input(message: Message, st: dict):
         f"📄 Договор №: {cd.get('contract_number', '—')}\n"
         f"🏗 Начало работ: {cd.get('work_start', '—')}\n"
         f"🏗 Окончание работ: {cd.get('work_end', '—')}\n"
-        f"💰 Дата оплаты: {cd.get('payment_date', '—')}\n"
+        f"💰 Условия оплаты: {cd.get('payment_terms', '—')}\n"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -844,7 +844,7 @@ async def on_confirm_contract(callback: CallbackQuery):
         "contract_number": cd["contract_number"],
         "work_start_date": cd["work_start"] + "г.",
         "work_end_date": cd["work_end"] + "г.",
-        "payment_date": cd["payment_date"] + "г",
+        "payment_terms": cd["payment_terms"],
     }
 
     try:

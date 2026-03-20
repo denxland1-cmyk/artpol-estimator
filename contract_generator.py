@@ -348,7 +348,7 @@ def generate_contract(
 
     work_start = client_data.get("work_start_date", "___")
     work_end = client_data.get("work_end_date", "___")
-    payment_date = client_data.get("payment_date", "___")
+    payment_terms = client_data.get("payment_terms", "___")
 
     # Фамилия И.О.
     name_parts = full_name.split()
@@ -414,10 +414,10 @@ def generate_contract(
     # Дата в приложении
     _replace_in_doc(doc, "от 13.01.2026 г.", f"от {contract_date} г.")
 
-    # График финансирования
+    # График финансирования — свободный текст условий оплаты
     _replace_in_doc(doc, "16.01.2025г Расчет              рублей.",
-                    f"{payment_date} Расчет {total_formatted} рублей.")
-    _replace_in_doc(doc, "16.01.2025г Расчет", f"{payment_date} Расчет {total_formatted}")
+                    payment_terms)
+    _replace_in_doc(doc, "16.01.2025г Расчет", payment_terms)
 
     # Реквизиты заказчика (в таблицах)
     _replace_in_doc(doc, "ФИО: ", f"ФИО: {full_name}")
@@ -475,7 +475,7 @@ if __name__ == "__main__":
         "contract_date": "04.03.2026",
         "work_start_date": "05.03.2026г.",
         "work_end_date": "05.03.2026г.",
-        "payment_date": "05.03.2026г",
+        "payment_terms": "Аванс 26.03.2026 - 50000 руб. Окончательный расчет 28.03.2026 - 26517 руб.",
     }
 
     path = generate_contract(
