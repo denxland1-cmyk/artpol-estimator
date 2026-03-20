@@ -20,6 +20,20 @@ AMO_TOKEN = os.environ.get("AMO_TOKEN", "")
 AMO_DOMAIN = os.environ.get("AMO_DOMAIN", "artpol.amocrm.ru")
 AMO_BASE_URL = f"https://{AMO_DOMAIN}/api/v4"
 
+# Воронка "Полусухая стяжка"
+PIPELINE_ID = 1055275
+STATUS_MEASUREMENT_DONE = 70381582   # Замер состоялся
+STATUS_OFFER_MADE = 18964384         # Сделано предложение
+
+# Кастомные поля сделок
+FIELD_AREA = 657699           # Площадь, м2 (numeric)
+FIELD_FLOOR = 657701          # Этаж (numeric)
+FIELD_ADDRESS = 657535        # Адрес (streetaddress)
+FIELD_MEASUREMENT_DT = 657533 # Дата и время замера (date_time)
+FIELD_INFO = 657579           # Общая информация (textarea)
+FIELD_OBJECT_TYPE = 658967    # Тип объекта (text)
+FIELD_THICKNESS = 658969      # Толщина стяжки (text)
+
 HEADERS = {
     "Authorization": f"Bearer {AMO_TOKEN}",
     "Content-Type": "application/json",
@@ -178,6 +192,46 @@ async def add_note_to_lead(lead_id: int, text: str) -> dict:
     return await _amo_post(f"/leads/{lead_id}/notes", data)
 
 
+async def upload_file_to_lead(lead_id: int, file_path: str, filename: str) -> dict:
+    """Загружает файл и прикрепляет как примечание к сделке."""
+    import os
+    if not os.path.exists(file_path):
+        logger.error("AMO upload: файл не найден %s", file_path)
+        return {"error": "file_not_found"}
+
+    try:
+        # Загружаем файл через AMO Drive API
+        async with httpx.AsyncClient(timeout=30) as http:
+            with open(file_path, "rb") as f:
+                files = {"file": (filename, f, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
+                resp = await http.post(
+                    f"https://{AMO_DOMAIN}/api/v4/leads/{lead_id}/files",
+                    headers={"Authorization": f"Bearer {AMO_TOKEN}"},
+                    files=files,
+                )
+
+            if resp.status_code in (200, 201):
+                logger.info("AMO: файл '%s' прикреплён к сделке #%s", filename, lead_id)
+                return resp.json() if resp.text else {"success": True}
+            else:
+                logger.warning("AMO upload status %s, пробуем через примечание", resp.status_code)
+
+        # Fallback: добавляем как примечание с упоминанием файла
+        note_data = [{
+            "entity_id": lead_id,
+            "note_type": "common",
+            "params": {
+                "text": f"📎 Документ: {filename} (отправлен через бота)",
+            },
+        }]
+        await _amo_post(f"/leads/{lead_id}/notes", note_data)
+        return {"success": True, "method": "note"}
+
+    except Exception as e:
+        logger.error("AMO upload error: %s", e)
+        return {"error": str(e)}
+
+
 # ========== Получение кастомных полей ==========
 
 async def get_lead_custom_fields() -> list:
@@ -215,40 +269,58 @@ async def fill_amo_lead(
     price: int,
     raw_text: str,
     area: float,
+    thickness: float,
     floor: int,
     address: str,
-    measurement_date: str,
-    target_status_id: int,
-    field_ids: dict = None,
+    object_type: str,
+    measurement_datetime: str,
+    measurement_timestamp: int = None,
 ) -> dict:
     """
     Находит сделку по телефону и заполняет данные.
-
-    field_ids: {"area": 123, "floor": 456, "address": 789}
+    Двигает из "Замер состоялся" → "Сделано предложение".
     """
     # 1. Ищем сделку
     lead = await find_lead_by_phone(phone)
     if not lead:
-        return {"error": "not_found", "detail": f"Сделка с телефоном {phone} не найдена"}
+        return {"error": "not_found", "detail": f"Сделка с телефоном {phone} не найдена в AMO"}
 
     lead_id = lead["id"]
     lead_name = lead.get("name", "")
     logger.info("AMO: нашли сделку #%s '%s'", lead_id, lead_name)
 
-    # 2. Обновляем бюджет и статус
+    # 2. Формируем кастомные поля
+    custom_fields = [
+        {"field_id": FIELD_AREA, "values": [{"value": area}]},
+        {"field_id": FIELD_FLOOR, "values": [{"value": floor}]},
+        {"field_id": FIELD_ADDRESS, "values": [{"value": address}]},
+        {"field_id": FIELD_OBJECT_TYPE, "values": [{"value": object_type or "квартира"}]},
+        {"field_id": FIELD_THICKNESS, "values": [{"value": f"{thickness} мм"}]},
+        {"field_id": FIELD_INFO, "values": [{"value": raw_text}]},
+    ]
+
+    # Дата и время замера (unix timestamp)
+    if measurement_timestamp:
+        custom_fields.append(
+            {"field_id": FIELD_MEASUREMENT_DT, "values": [{"value": measurement_timestamp}]}
+        )
+
+    # 3. Обновляем сделку: бюджет + статус + поля
     update_result = await update_lead(
         lead_id=lead_id,
         price=price,
-        status_id=target_status_id,
+        status_id=STATUS_OFFER_MADE,
+        custom_fields=custom_fields,
     )
 
     if update_result.get("error"):
         return {"error": "update_failed", "detail": str(update_result)}
 
-    # 3. Добавляем примечание с замером
+    # 4. Примечание с замером
     note_text = (
-        f"📋 ЗАМЕР от {measurement_date}\n"
+        f"📋 ЗАМЕР от {measurement_datetime}\n"
         f"📐 Площадь: {area} м²\n"
+        f"📏 Толщина: {thickness} мм\n"
         f"🏢 Этаж: {floor}\n"
         f"🏘 Адрес: {address}\n"
         f"💰 Бюджет: {price:,}₽\n\n"
@@ -256,7 +328,7 @@ async def fill_amo_lead(
     )
     await add_note_to_lead(lead_id, note_text)
 
-    logger.info("AMO: сделка #%s обновлена, бюджет %s, статус %s", lead_id, price, target_status_id)
+    logger.info("AMO: сделка #%s обновлена → 'Сделано предложение', бюджет %s₽", lead_id, price)
 
     return {
         "success": True,

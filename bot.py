@@ -20,7 +20,7 @@ from database import init_db, save_measurement, update_measurement_status, close
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 from kp_generator import generate_kp
 from contract_generator import generate_contract
-from amo_crm import format_pipelines, format_custom_fields
+from amo_crm import format_pipelines, format_custom_fields, fill_amo_lead, upload_file_to_lead
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -239,6 +239,7 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
     if payment:
         rows.append([InlineKeyboardButton(text="📄 Сформировать КП", callback_data="generate_kp")])
         rows.append([InlineKeyboardButton(text="📋 Сформировать договор", callback_data="start_contract")])
+        rows.append([InlineKeyboardButton(text="📊 Заполнить АМО", callback_data="fill_amo")])
 
     # Новый замер
     rows.append([InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")])
@@ -621,6 +622,7 @@ async def on_generate_kp(callback: CallbackQuery):
         )
 
         # Отправляем файл
+        st["kp_path"] = output_path  # сохраняем для АМО
         doc_file = FSInputFile(output_path, filename=f"КП_{fname}.docx")
         await callback.message.answer_document(
             doc_file,
@@ -630,6 +632,124 @@ async def on_generate_kp(callback: CallbackQuery):
     except Exception as e:
         logger.error("Ошибка генерации КП: %s", e, exc_info=True)
         await callback.message.answer("❌ Ошибка генерации КП. Попробуй ещё раз.")
+
+
+# --- Заполнить АМО ---
+@dp.callback_query(F.data == "fill_amo")
+async def on_fill_amo(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st or not st.get("estimate"):
+        await callback.answer("Сначала рассчитай смету.")
+        return
+
+    parsed = st["parsed"]
+    phone = parsed.get("client_phone", "")
+    if not phone:
+        await callback.answer("❌ Нет телефона клиента в замере!")
+        await callback.message.answer("❌ Телефон клиента не найден в замере. АМО не может найти сделку без телефона.")
+        return
+
+    await callback.answer("⏳ Ищу сделку в АМО...")
+    processing = await callback.message.answer("🔍 Ищу сделку в АМО по номеру " + phone + "...")
+
+    estimate = st["estimate"]
+    total = estimate["grand_total"]
+    if st.get("sand_removal"):
+        total += 5000
+
+    # Дата и время первого замера
+    created = st.get("created_at")
+    if created:
+        measurement_dt = created.strftime("%d.%m.%Y %H:%M")
+        measurement_ts = int(created.timestamp())
+    else:
+        measurement_dt = "—"
+        measurement_ts = None
+
+    # Собираем текст замера
+    raw_text = ""
+    if st.get("db_id"):
+        # Форматируем из parsed
+        lines = []
+        if parsed.get("client_name"):
+            lines.append(f"Клиент: {parsed['client_name']}")
+        if phone:
+            lines.append(f"Тел: {phone}")
+        if parsed.get("object_type"):
+            lines.append(f"Тип: {parsed['object_type']}")
+        if parsed.get("area_m2"):
+            lines.append(f"Площадь: {parsed['area_m2']} м²")
+        if parsed.get("thickness_mm_avg"):
+            lines.append(f"Толщина: {parsed['thickness_mm_avg']} мм")
+        if parsed.get("location_type"):
+            lines.append(f"Локация: {parsed['location_type']}")
+        if parsed.get("floor"):
+            lines.append(f"Этаж: {parsed['floor']}")
+        if parsed.get("address"):
+            lines.append(f"Адрес: {parsed['address']}")
+        if parsed.get("keramzit"):
+            k = parsed["keramzit"]
+            lines.append(f"Керамзит: {k.get('area_m2', 0)} м², {k.get('thickness_mm', 0)} мм")
+        if parsed.get("special_conditions"):
+            lines.append(f"Особые условия: {', '.join(parsed['special_conditions'])}")
+        lines.append(f"\nБюджет: {total:,}₽ ({st.get('grade', 'М150')})")
+        raw_text = "\n".join(lines)
+
+    result = await fill_amo_lead(
+        phone=phone,
+        price=total,
+        raw_text=raw_text,
+        area=parsed.get("area_m2", 0),
+        thickness=parsed.get("thickness_mm_avg", 0),
+        floor=st.get("floor", 1),
+        address=parsed.get("address", ""),
+        object_type=parsed.get("object_type", ""),
+        measurement_datetime=measurement_dt,
+        measurement_timestamp=measurement_ts,
+    )
+
+    if result.get("success"):
+        lead_id = result["lead_id"]
+        files_sent = []
+
+        # Прикрепляем КП если есть
+        kp_path = st.get("kp_path")
+        if kp_path:
+            import os
+            if os.path.exists(kp_path):
+                kp_name = os.path.basename(kp_path)
+                await upload_file_to_lead(lead_id, kp_path, kp_name)
+                files_sent.append("📄 КП")
+
+        # Прикрепляем договор если есть
+        contract_path = st.get("contract_path")
+        if contract_path:
+            import os
+            if os.path.exists(contract_path):
+                contract_name = os.path.basename(contract_path)
+                await upload_file_to_lead(lead_id, contract_path, contract_name)
+                files_sent.append("📋 Договор")
+
+        files_info = ""
+        if files_sent:
+            files_info = f"\n📎 Прикреплено: {', '.join(files_sent)}"
+
+        await processing.edit_text(
+            f"✅ <b>АМО обновлена!</b>\n\n"
+            f"📊 Сделка: {result['lead_name']}\n"
+            f"💰 Бюджет: {total:,}₽\n"
+            f"📍 Статус: → Сделано предложение{files_info}",
+            parse_mode=ParseMode.HTML,
+        )
+    elif result.get("error") == "not_found":
+        await processing.edit_text(
+            f"❌ Сделка с телефоном {phone} не найдена в АМО.\n"
+            f"Проверь что сделка существует и номер в названии совпадает."
+        )
+    else:
+        await processing.edit_text(
+            f"❌ Ошибка обновления АМО: {result.get('detail', 'неизвестно')}"
+        )
 
 
 # --- Сброс ---
@@ -876,6 +996,7 @@ async def on_confirm_contract(callback: CallbackQuery):
             output_path=output_path,
         )
 
+        st["contract_path"] = output_path  # сохраняем для АМО
         doc_file = FSInputFile(
             output_path,
             filename=f"Договор_{cd['contract_number']}_{name_short}.docx"
