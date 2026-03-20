@@ -395,12 +395,6 @@ async def handle_text(message: Message):
             and any(x in text.lower() for x in ["м2", "мм", "м²", "квартир", "этаж", "площад", "слой", "стяжк"])
         )
 
-        if text.strip().lower() in ("/cancel", "отмена", "отменить"):
-            st["contract_step"] = -1
-            st.pop("contract_data", None)
-            await message.answer("❌ Создание договора отменено. Отправь новый замер.")
-            return
-
         if looks_like_measurement:
             # Это замер, а не паспортные данные — сбрасываем FSM
             st["contract_step"] = -1
@@ -860,7 +854,10 @@ async def on_start_contract(callback: CallbackQuery):
     st["contract_data"] = {}
 
     _, prompt = CONTRACT_STEPS[0]
-    await callback.message.answer(prompt + "\n\n<i>Напиши «отмена» чтобы вернуться к замерам</i>", parse_mode=ParseMode.HTML)
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
+    ])
+    await callback.message.answer(prompt, parse_mode=ParseMode.HTML, reply_markup=cancel_kb)
     await callback.answer("Заполняем договор")
 
 
@@ -952,11 +949,17 @@ async def handle_contract_input(message: Message, st: dict):
 
         if result.get("registration_address"):
             st["contract_step"] = 2  # contract_number
+            _, prompt = CONTRACT_STEPS[st["contract_step"]]
+            await message.answer(prompt, parse_mode=ParseMode.HTML)
         else:
-            st["contract_step"] = 1  # reg_address
+            # Прописки нет — спрашиваем
+            st["contract_step"] = 1  # если кинут фото — обработается как прописка
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Без прописки", callback_data="skip_registration")],
+                [InlineKeyboardButton(text="📸 Добавить прописку", callback_data="add_registration")],
+            ])
+            await message.answer("Прописка не найдена на фото.", reply_markup=kb)
 
-        _, prompt = CONTRACT_STEPS[st["contract_step"]]
-        await message.answer(prompt, parse_mode=ParseMode.HTML)
         return True
 
     # --- Шаг: адрес регистрации (фото прописки или текст) ---
@@ -1117,6 +1120,44 @@ async def on_restart_contract(callback: CallbackQuery):
     st["contract_data"] = {}
 
     _, prompt = CONTRACT_STEPS[0]
+    await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel_contract")
+async def on_cancel_contract(callback: CallbackQuery):
+    """Отменяет создание договора."""
+    st = user_state.get(callback.from_user.id)
+    if st:
+        st["contract_step"] = -1
+        st.pop("contract_data", None)
+    await callback.message.answer("❌ Создание договора отменено.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "skip_registration")
+async def on_skip_registration(callback: CallbackQuery):
+    """Пропускает прописку — переходим к номеру договора."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["contract_data"]["reg_address"] = "—"
+    st["contract_step"] = 2  # contract_number
+    _, prompt = CONTRACT_STEPS[st["contract_step"]]
+    await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "add_registration")
+async def on_add_registration(callback: CallbackQuery):
+    """Просит фото/текст прописки."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["contract_step"] = 1  # reg_address
+    _, prompt = CONTRACT_STEPS[st["contract_step"]]
     await callback.message.answer(prompt, parse_mode=ParseMode.HTML)
     await callback.answer()
 
