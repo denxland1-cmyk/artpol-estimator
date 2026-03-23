@@ -21,6 +21,7 @@ from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, 
 from kp_generator import generate_kp
 from contract_generator import generate_contract
 from amo_crm import format_pipelines, format_custom_fields, fill_amo_lead, upload_file_to_lead
+from kronos import create_event, bind_lead, SURVEYORS, find_surveyor_id
 
 # ============================================================
 # ⚠️ ВСЕ КЛЮЧИ И ТОКЕНЫ — ТОЛЬКО ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
@@ -240,6 +241,7 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="📄 Сформировать КП", callback_data="generate_kp")])
         rows.append([InlineKeyboardButton(text="📋 Сформировать договор", callback_data="start_contract")])
         rows.append([InlineKeyboardButton(text="📊 Заполнить АМО", callback_data="fill_amo")])
+        rows.append([InlineKeyboardButton(text="📅 Записать в Кронос", callback_data="start_kronos")])
 
     # Новый замер
     rows.append([InlineKeyboardButton(text="🔄 Новый замер", callback_data="retry")])
@@ -384,6 +386,12 @@ async def handle_text(message: Message):
         except ValueError:
             await message.answer("❌ Введи число (например: 7 или 12.5)")
             st["awaiting_custom_modifier"] = direction
+            return
+
+    # Ждём дату/время для Кроноса?
+    if st and st.get("kronos_step") == "datetime":
+        handled = await handle_kronos_datetime(message, st)
+        if handled:
             return
 
     # Ждём ввод данных для договора?
@@ -790,6 +798,7 @@ async def on_fill_amo(callback: CallbackQuery):
 
     if result.get("success"):
         lead_id = result["lead_id"]
+        st["amo_lead_id"] = lead_id  # Для привязки к Кроносу
         files_sent = []
 
         # Прикрепляем КП если есть
@@ -844,6 +853,140 @@ async def on_retry(callback: CallbackQuery):
         await callback.answer()
     except Exception:
         pass
+
+
+# --- Кронос: запись замера ---
+
+@dp.callback_query(F.data == "start_kronos")
+async def on_start_kronos(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    # Показываем выбор замерщика
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=name, callback_data=f"kronos_surveyor_{sid}")]
+        for name, sid in SURVEYORS.items()
+    ] + [
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="kronos_cancel")]
+    ])
+    await callback.message.answer(
+        "📅 <b>Запись в Кронос</b>\n\nВыбери замерщика:",
+        reply_markup=kb,
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("kronos_surveyor_"))
+async def on_kronos_surveyor(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    surveyor_id = int(callback.data.replace("kronos_surveyor_", ""))
+    st["kronos_surveyor_id"] = surveyor_id
+
+    # Имя замерщика для отображения
+    surveyor_name = next((n for n, sid in SURVEYORS.items() if sid == surveyor_id), "?")
+    st["kronos_surveyor_name"] = surveyor_name
+    st["kronos_step"] = "datetime"
+
+    await callback.message.edit_text(
+        f"✅ Замерщик: <b>{surveyor_name}</b>\n\n"
+        "📅 Введи <b>дату и время замера</b>:\n"
+        "Формат: <code>25.03.2026 14:00</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "kronos_cancel")
+async def on_kronos_cancel(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if st:
+        st.pop("kronos_step", None)
+        st.pop("kronos_surveyor_id", None)
+        st.pop("kronos_surveyor_name", None)
+    await callback.message.edit_text("❌ Запись в Кронос отменена.")
+    await callback.answer()
+
+
+async def handle_kronos_datetime(message, st):
+    """Обработка ввода даты/времени для Кроноса."""
+    import re
+
+    text = message.text.strip()
+    # Парсим "25.03.2026 14:00" или "25.03 14:00"
+    m = re.match(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s+(\d{1,2}):(\d{2})", text)
+    if not m:
+        await message.answer(
+            "❌ Не могу разобрать дату.\n"
+            "Формат: <code>25.03.2026 14:00</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    day, month = int(m.group(1)), int(m.group(2))
+    year = int(m.group(3)) if m.group(3) else 2026
+    hour, minute = int(m.group(4)), int(m.group(5))
+
+    date_str = f"{year}-{month:02d}-{day:02d}"
+    time_from = f"{hour:02d}:{minute:02d}"
+    time_to = f"{hour + 1:02d}:{minute:02d}"
+
+    parsed = st.get("parsed", {})
+    address = parsed.get("address", "Адрес не указан")
+    phone = parsed.get("phone", "")
+    client_name = parsed.get("client_name", "Клиент")
+
+    surveyor_id = st.get("kronos_surveyor_id")
+    surveyor_name = st.get("kronos_surveyor_name", "?")
+
+    processing = await message.answer("⏳ Создаю запись в Кроносе...")
+
+    result = await create_event(
+        date=date_str,
+        time_from=time_from,
+        time_to=time_to,
+        surveyor_id=surveyor_id,
+        contact_name=client_name,
+        contact_phone=phone,
+        address=address,
+    )
+
+    if not result:
+        await processing.edit_text("❌ Ошибка создания записи в Кроносе. Попробуй ещё раз.")
+        st.pop("kronos_step", None)
+        return True
+
+    event_id = result.get("id")
+    msg = (
+        f"✅ <b>Запись в Кроносе создана!</b>\n\n"
+        f"📅 {day:02d}.{month:02d}.{year} {time_from}–{time_to}\n"
+        f"👷 Замерщик: {surveyor_name}\n"
+        f"📍 {address}"
+    )
+
+    # Привязка к сделке AMO если есть lead_id
+    lead_id = st.get("amo_lead_id")
+    if lead_id and event_id:
+        bound = await bind_lead(event_id, lead_id)
+        if bound:
+            msg += f"\n🔗 Привязана к сделке AMO #{lead_id}"
+        else:
+            msg += f"\n⚠️ Не удалось привязать к сделке AMO"
+
+    await processing.edit_text(msg, parse_mode=ParseMode.HTML)
+
+    # Очищаем состояние Кроноса
+    st.pop("kronos_step", None)
+    st.pop("kronos_surveyor_id", None)
+    st.pop("kronos_surveyor_name", None)
+
+    return True
 
 
 # --- Договор: FSM ---
