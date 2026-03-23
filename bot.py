@@ -420,24 +420,34 @@ async def handle_text(message: Message):
         processing_msg = await message.answer("⏳ Дополняю данные замера...")
 
         try:
-            # Парсим дополнение
-            supplement = await process_measurement(message.text)
-            if supplement.get("error"):
-                await processing_msg.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
-                st["awaiting_supplement"] = True
-                return
-
-            # Объединяем: новые данные перезаписывают только пустые поля
             old = st["parsed"]
-            for key, val in supplement.items():
-                if key in ("missing_fields", "error", "raw_response"):
-                    continue
-                if val is None or val == "" or val == [] or val == {}:
-                    continue
-                # Перезаписываем только если старое значение пустое
-                old_val = old.get(key)
-                if old_val is None or old_val == "" or old_val == [] or old_val == {}:
-                    old[key] = val
+            text = message.text.strip()
+
+            # Если текст короткий (до 40 символов) и нет цифр длиннее 4 знаков —
+            # скорее всего это просто имя клиента
+            import re
+            has_measurement_data = bool(re.search(r'\d{5,}|м2|м²|мм|этаж|площад', text.lower()))
+            if len(text) <= 40 and not has_measurement_data:
+                # Это имя клиента
+                old["client_name"] = text
+                logger.info("Дополнение: имя клиента = %s", text)
+            else:
+                # Парсим как полноценные данные замера
+                supplement = await process_measurement(text)
+                if supplement.get("error"):
+                    await processing_msg.edit_text("❌ Не удалось распознать. Попробуй ещё раз.")
+                    st["awaiting_supplement"] = True
+                    return
+
+                # Объединяем: новые данные перезаписывают только пустые поля
+                for key, val in supplement.items():
+                    if key in ("missing_fields", "error", "raw_response"):
+                        continue
+                    if val is None or val == "" or val == [] or val == {}:
+                        continue
+                    old_val = old.get(key)
+                    if old_val is None or old_val == "" or old_val == [] or old_val == {}:
+                        old[key] = val
 
             # Пересчитываем missing_fields
             required = []
