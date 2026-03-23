@@ -867,95 +867,38 @@ async def on_retry(callback: CallbackQuery):
 
 # --- Кронос: запись замера ---
 
-@dp.callback_query(F.data == "start_kronos")
-async def on_start_kronos(callback: CallbackQuery):
-    st = user_state.get(callback.from_user.id)
-    if not st:
-        await callback.answer("Отправь замер заново.")
-        return
-
-    # Показываем выбор замерщика
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=name, callback_data=f"kronos_surveyor_{sid}")]
-        for name, sid in SURVEYORS.items()
-    ] + [
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="kronos_cancel")]
-    ])
-    await callback.message.answer(
-        "📅 <b>Запись в Кронос</b>\n\nВыбери замерщика:",
-        reply_markup=kb,
-        parse_mode=ParseMode.HTML,
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("kronos_surveyor_"))
-async def on_kronos_surveyor(callback: CallbackQuery):
-    st = user_state.get(callback.from_user.id)
-    if not st:
-        await callback.answer("Отправь замер заново.")
-        return
-
-    surveyor_id = int(callback.data.replace("kronos_surveyor_", ""))
-    st["kronos_surveyor_id"] = surveyor_id
-
-    # Имя замерщика для отображения
-    surveyor_name = next((n for n, sid in SURVEYORS.items() if sid == surveyor_id), "?")
-    st["kronos_surveyor_name"] = surveyor_name
-    st["kronos_step"] = "datetime"
-
-    await callback.message.edit_text(
-        f"✅ Замерщик: <b>{surveyor_name}</b>\n\n"
-        "📅 Введи <b>дату и время замера</b>:\n"
-        "Формат: <code>25.03.2026 14:00</code>",
-        parse_mode=ParseMode.HTML,
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "kronos_cancel")
-async def on_kronos_cancel(callback: CallbackQuery):
-    st = user_state.get(callback.from_user.id)
-    if st:
-        st.pop("kronos_step", None)
-        st.pop("kronos_surveyor_id", None)
-        st.pop("kronos_surveyor_name", None)
-    await callback.message.edit_text("❌ Запись в Кронос отменена.")
-    await callback.answer()
-
-
-async def handle_kronos_datetime(message, st):
-    """Обработка ввода даты/времени для Кроноса."""
+def _parse_measurement_date(raw: str) -> tuple[str, str, str, int, int, int] | None:
+    """Парсит дату из формата 'ДД.ММ.ГГ' или 'ДД.ММ.ГГГГ' → (date_str, time не трогаем, day, month, year)."""
     import re
-
-    text = message.text.strip()
-    # Парсим "25.03.2026 14:00" или "25.03 14:00"
-    m = re.match(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s+(\d{1,2}):(\d{2})", text)
+    m = re.match(r"(\d{1,2})\.(\d{1,2})\.?(\d{2,4})?", raw.strip())
     if not m:
-        await message.answer(
-            "❌ Не могу разобрать дату.\n"
-            "Формат: <code>25.03.2026 14:00</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return True
-
+        return None
     day, month = int(m.group(1)), int(m.group(2))
-    year = int(m.group(3)) if m.group(3) else 2026
-    hour, minute = int(m.group(4)), int(m.group(5))
-
+    year_str = m.group(3)
+    if year_str:
+        year = int(year_str)
+        if year < 100:
+            year += 2000
+    else:
+        year = 2026
     date_str = f"{year}-{month:02d}-{day:02d}"
-    time_from = f"{hour:02d}:{minute:02d}"
-    time_to = f"{hour + 1:02d}:{minute:02d}"
+    return date_str, day, month, year
 
+
+async def _do_kronos_create(message_or_callback, st, date_str, day, month, year, time_from, time_to, surveyor_id, surveyor_name):
+    """Общая функция создания записи в Кроносе."""
     parsed = st.get("parsed", {})
     address = parsed.get("address", "Адрес не указан")
-    phone = parsed.get("phone", "")
+    phone = parsed.get("client_phone", "")
     client_name = parsed.get("client_name", "Клиент")
 
-    surveyor_id = st.get("kronos_surveyor_id")
-    surveyor_name = st.get("kronos_surveyor_name", "?")
+    # Определяем куда писать
+    if hasattr(message_or_callback, 'message'):
+        send = message_or_callback.message.answer
+    else:
+        send = message_or_callback.answer
 
-    processing = await message.answer("⏳ Создаю запись в Кроносе...")
+    processing = await send("⏳ Создаю запись в Кроносе...")
 
     result = await create_event(
         date=date_str,
@@ -970,7 +913,7 @@ async def handle_kronos_datetime(message, st):
     if not result:
         await processing.edit_text("❌ Ошибка создания записи в Кроносе. Попробуй ещё раз.")
         st.pop("kronos_step", None)
-        return True
+        return
 
     event_id = result.get("id")
     msg = (
@@ -996,6 +939,160 @@ async def handle_kronos_datetime(message, st):
     st.pop("kronos_surveyor_id", None)
     st.pop("kronos_surveyor_name", None)
 
+
+@dp.callback_query(F.data == "start_kronos")
+async def on_start_kronos(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    parsed = st.get("parsed", {})
+
+    # Проверяем: есть ли дата/время и замерщик в данных замера?
+    raw_date = parsed.get("measurement_date", "")
+    raw_time = parsed.get("measurement_time", "")
+    raw_surveyor = parsed.get("surveyor_name", "")
+
+    # Ищем замерщика
+    surveyor_id = find_surveyor_id(raw_surveyor) if raw_surveyor else None
+    surveyor_name = next((n for n, sid in SURVEYORS.items() if sid == surveyor_id), None) if surveyor_id else None
+
+    # Парсим дату
+    date_info = _parse_measurement_date(raw_date) if raw_date else None
+
+    # Парсим время
+    time_from = raw_time.strip() if raw_time else None
+    if time_from:
+        # Вычисляем time_to (+1 час)
+        try:
+            h = int(time_from.split(":")[0])
+            m = time_from.split(":")[1] if ":" in time_from else "00"
+            time_to = f"{h + 1:02d}:{m}"
+        except (ValueError, IndexError):
+            time_from = None
+            time_to = None
+    else:
+        time_to = None
+
+    # ВСЁ ЕСТЬ → сразу создаём
+    if date_info and time_from and surveyor_id and surveyor_name:
+        date_str, day, month, year = date_info
+        await callback.answer("Создаю запись...")
+        await _do_kronos_create(callback, st, date_str, day, month, year, time_from, time_to, surveyor_id, surveyor_name)
+        return
+
+    # Замерщик есть, даты нет → сохраняем замерщика, спрашиваем дату
+    if surveyor_id and surveyor_name and not (date_info and time_from):
+        st["kronos_surveyor_id"] = surveyor_id
+        st["kronos_surveyor_name"] = surveyor_name
+        st["kronos_step"] = "datetime"
+        await callback.message.answer(
+            f"✅ Замерщик: <b>{surveyor_name}</b>\n\n"
+            "📅 Введи <b>дату и время замера</b>:\n"
+            "Формат: <code>25.03.2026 14:00</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        await callback.answer()
+        return
+
+    # Дата есть, замерщика нет → сохраняем дату, спрашиваем замерщика
+    if date_info and time_from:
+        st["kronos_date_info"] = date_info
+        st["kronos_time_from"] = time_from
+        st["kronos_time_to"] = time_to
+
+    # Показываем выбор замерщика
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=name, callback_data=f"kronos_surveyor_{sid}")]
+        for name, sid in SURVEYORS.items()
+    ] + [
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="kronos_cancel")]
+    ])
+    await callback.message.answer(
+        "📅 <b>Запись в Кронос</b>\n\nВыбери замерщика:",
+        reply_markup=kb,
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("kronos_surveyor_"))
+async def on_kronos_surveyor(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    surveyor_id = int(callback.data.replace("kronos_surveyor_", ""))
+    st["kronos_surveyor_id"] = surveyor_id
+    surveyor_name = next((n for n, sid in SURVEYORS.items() if sid == surveyor_id), "?")
+    st["kronos_surveyor_name"] = surveyor_name
+
+    # Если дата уже сохранена → сразу создаём
+    date_info = st.get("kronos_date_info")
+    time_from = st.get("kronos_time_from")
+    time_to = st.get("kronos_time_to")
+    if date_info and time_from:
+        date_str, day, month, year = date_info
+        await callback.answer("Создаю запись...")
+        await _do_kronos_create(callback, st, date_str, day, month, year, time_from, time_to, surveyor_id, surveyor_name)
+        return
+
+    # Иначе спрашиваем дату
+    st["kronos_step"] = "datetime"
+    await callback.message.edit_text(
+        f"✅ Замерщик: <b>{surveyor_name}</b>\n\n"
+        "📅 Введи <b>дату и время замера</b>:\n"
+        "Формат: <code>25.03.2026 14:00</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "kronos_cancel")
+async def on_kronos_cancel(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if st:
+        st.pop("kronos_step", None)
+        st.pop("kronos_surveyor_id", None)
+        st.pop("kronos_surveyor_name", None)
+        st.pop("kronos_date_info", None)
+        st.pop("kronos_time_from", None)
+        st.pop("kronos_time_to", None)
+    await callback.message.edit_text("❌ Запись в Кронос отменена.")
+    await callback.answer()
+
+
+async def handle_kronos_datetime(message, st):
+    """Обработка ввода даты/времени для Кроноса."""
+    import re
+
+    text = message.text.strip()
+    # Парсим "25.03.2026 14:00" или "25.03 14:00" или "25.03.26 14:00"
+    m = re.match(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\s+(\d{1,2}):(\d{2})", text)
+    if not m:
+        await message.answer(
+            "❌ Не могу разобрать дату.\n"
+            "Формат: <code>25.03.2026 14:00</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    day, month = int(m.group(1)), int(m.group(2))
+    year = int(m.group(3)) if m.group(3) else 2026
+    if year < 100:
+        year += 2000
+    hour, minute = int(m.group(4)), int(m.group(5))
+
+    date_str = f"{year}-{month:02d}-{day:02d}"
+    time_from = f"{hour:02d}:{minute:02d}"
+    time_to = f"{hour + 1:02d}:{minute:02d}"
+
+    surveyor_id = st.get("kronos_surveyor_id")
+    surveyor_name = st.get("kronos_surveyor_name", "?")
+
+    await _do_kronos_create(message, st, date_str, day, month, year, time_from, time_to, surveyor_id, surveyor_name)
     return True
 
 
