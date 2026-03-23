@@ -156,8 +156,9 @@ async def find_lead_by_phone(phone: str) -> dict | None:
         if clean_phone in name.replace("+", "").replace(" ", "").replace("-", ""):
             return lead
 
-    # Если не нашли точное совпадение — возвращаем первую
-    return leads[0] if leads else None
+    # Если не нашли точное совпадение — НЕ возвращаем чужую сделку
+    logger.info("AMO: телефон %s не найден в названиях сделок, вернули None", clean_phone)
+    return None
 
 
 # ========== Обновление сделки ==========
@@ -217,7 +218,10 @@ async def upload_file_to_lead(lead_id: int, file_path: str, filename: str) -> di
 
         s3.upload_file(
             file_path, bucket, s3_key,
-            ExtraArgs={"ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            ExtraArgs={
+                "ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "ACL": "public-read",
+            },
         )
 
         public_url = f"https://{bucket}.storage.yandexcloud.net/{s3_key}"
