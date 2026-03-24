@@ -138,6 +138,9 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
         lines.append("🔥 Тёплый пол: да")
     elif data.get("warm_floor") is False:
         lines.append("❄️ Тёплый пол: нет")
+    if data.get("sand_transport"):
+        label = "КАМАЗЫ" if data["sand_transport"] == "камаз" else "ГАЗОНЫ"
+        lines.append(f"🚛 Песок: только {label}")
     if data.get("deadline"):
         lines.append(f"⏰ Сроки: {data['deadline']}")
     if data.get("special_conditions"):
@@ -267,6 +270,7 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
         keramzit_area_m2=st.get("keramzit_area", 0),
         keramzit_thickness_mm=st.get("keramzit_thick", 0),
         price_modifier=st.get("modifier", 0),
+        sand_transport=st.get("sand_transport"),
     )
     st["estimate"] = estimate
 
@@ -370,6 +374,7 @@ async def handle_text(message: Message):
                 keramzit_area_m2=st.get("keramzit_area", 0),
                 keramzit_thickness_mm=st.get("keramzit_thick", 0),
                 price_modifier=st.get("modifier", 0),
+                sand_transport=st.get("sand_transport"),
             )
             st["estimate"] = estimate
 
@@ -557,6 +562,9 @@ async def on_confirm(callback: CallbackQuery):
     keramzit_data = parsed.get("keramzit") or {}
     st["keramzit_area"] = keramzit_data.get("area_m2", 0) or 0
     st["keramzit_thick"] = keramzit_data.get("thickness_mm", 0) or 0
+
+    # Спецтранспорт для песка
+    st["sand_transport"] = parsed.get("sand_transport")
 
     await recalc_and_show(callback, st)
     await callback.answer("Смета рассчитана!")

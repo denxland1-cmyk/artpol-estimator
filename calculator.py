@@ -66,16 +66,52 @@ def _round_sand_tons(tons: float) -> float:
         return whole + 1.0
 
 
-def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: float = 0) -> dict:
+def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: float = 0, sand_transport: str = None) -> dict:
     """
     Расчёт песка: количество, стоимость, доставка.
     distance_km — от Окской Гавани до объекта (для области).
+    sand_transport — "камаз" или "газон" если указан спецтранспорт.
     Формула: объём × 1.8 × 1.12, спецокругление до 0.5 т.
     """
     volume_m3 = area_m2 * thickness_mm / 1000
     sand_tons_raw = round(volume_m3 * 1.8 * 1.12, 2)
     sand_tons = _round_sand_tons(sand_tons_raw)
 
+    # --- Спецтранспорт: песок на камазах / газонах ---
+    if sand_transport in ("камаз", "газон"):
+        max_per_trip = 18 if sand_transport == "камаз" else 6
+        trip_delivery_city = 7000 if sand_transport == "камаз" else 5000
+        trip_delivery_oblast = 250 * distance_km  # до 19т тариф
+
+        import math
+        n_trips = math.ceil(sand_tons / max_per_trip)
+        tons_per_trip = round(sand_tons / n_trips, 2)
+
+        sand_cost = 0
+        delivery = 0
+        extra = 0
+        for _ in range(n_trips):
+            sand_cost += tons_per_trip * SAND_PRICE_PER_TON
+            if is_city:
+                delivery += trip_delivery_city
+            else:
+                delivery += trip_delivery_oblast
+            extra += SAND_EXTRA
+
+        label = "КАМАЗ" if sand_transport == "камаз" else "ГАЗОН"
+        transport = f"{n_trips}× {label} {tons_per_trip}т"
+
+        return {
+            "volume_m3": round(volume_m3, 2),
+            "sand_tons": sand_tons,
+            "sand_cost": round(sand_cost),
+            "delivery": round(delivery),
+            "extra": round(extra),
+            "transport": transport,
+            "total": round(sand_cost + delivery + extra),
+        }
+
+    # --- Обычный расчёт ---
     sand_cost = sand_tons * SAND_PRICE_PER_TON
 
     if is_city:
@@ -85,16 +121,43 @@ def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: f
         elif sand_tons <= 18:
             delivery = 7000
             transport = "КАМАЗ (6-18т)"
-        else:
+        elif sand_tons <= 30:
             delivery = 9000
             transport = "МАЗ (19-30т)"
+        else:
+            # Больше 30т — 2 рейса: МАЗ 30т + остаток
+            leftover = sand_tons - 30
+            first_trip = 9000  # МАЗ 30т
+            if leftover <= 6:
+                second_trip = 5000
+                second_label = "ГАЗОН"
+            elif leftover <= 18:
+                second_trip = 7000
+                second_label = "КАМАЗ"
+            else:
+                second_trip = 9000
+                second_label = "МАЗ"
+            delivery = first_trip + second_trip
+            transport = f"МАЗ 30т + {second_label} {leftover}т (2 рейса)"
     else:
         if sand_tons <= 19:
             delivery = 250 * distance_km
             transport = f"Область до 19т (250₽×{distance_km}км)"
-        else:
+        elif sand_tons <= 30:
             delivery = 300 * distance_km
             transport = f"Область 19-30т (300₽×{distance_km}км)"
+        else:
+            # Больше 30т — 2 рейса: МАЗ 30т + остаток
+            leftover = sand_tons - 30
+            first_trip = 300 * distance_km  # МАЗ 30т
+            if leftover <= 19:
+                second_trip = 250 * distance_km
+                second_label = f"до 19т (250₽×{distance_km}км)"
+            else:
+                second_trip = 300 * distance_km
+                second_label = f"19-30т (300₽×{distance_km}км)"
+            delivery = first_trip + second_trip
+            transport = f"Область 30т + {leftover}т (2 рейса)"
 
     total = sand_cost + delivery + SAND_EXTRA
 
@@ -385,6 +448,7 @@ def calculate_estimate(
     keramzit_area_m2: float = 0,
     keramzit_thickness_mm: float = 0,
     price_modifier: float = 0,
+    sand_transport: str = None,
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -400,11 +464,12 @@ def calculate_estimate(
     - keramzit_area_m2: площадь керамзитного основания (0 = без керамзита)
     - keramzit_thickness_mm: толщина слоя керамзита в мм
     - price_modifier: скидка/наценка в % (например -5 = скидка 5%, +3 = наценка 3%)
+    - sand_transport: "камаз" / "газон" / None — спецтранспорт для песка
     """
     # Коэффициент цены: -5% → 0.95, +3% → 1.03
     k = 1 + price_modifier / 100 if price_modifier != 0 else 1
 
-    sand = calc_sand(area_m2, thickness_mm, is_city, distance_materials_km)
+    sand = calc_sand(area_m2, thickness_mm, is_city, distance_materials_km, sand_transport)
     cement = calc_cement(area_m2, thickness_mm, grade, is_city, distance_materials_km)
     fiber = calc_fiber(area_m2, thickness_mm)
     izoflex = calc_izoflex(area_m2)
