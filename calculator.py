@@ -48,13 +48,33 @@ SAND_EXTRA = 1000  # +1000₽ к каждой доставке песка
 # ПЕСОК
 # ============================================================
 
+def _round_sand_tons(tons: float) -> float:
+    """
+    Специальное округление тонн песка:
+    0.1–0.4 → 0.5, 0.6–0.9 → следующее целое, 0.0/0.5 — без изменений.
+    Работает по первому десятичному знаку.
+    """
+    whole = int(tons)
+    frac = round(tons - whole, 2)
+    # Определяем первый десятичный знак
+    first_dec = int(frac * 10)
+    if first_dec == 0 or first_dec == 5:
+        return whole + first_dec / 10
+    elif 1 <= first_dec <= 4:
+        return whole + 0.5
+    else:  # 6-9
+        return whole + 1.0
+
+
 def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: float = 0) -> dict:
     """
     Расчёт песка: количество, стоимость, доставка.
     distance_km — от Окской Гавани до объекта (для области).
+    Формула: объём × 1.8 × 1.12, спецокругление до 0.5 т.
     """
     volume_m3 = area_m2 * thickness_mm / 1000
-    sand_tons = volume_m3 * 2
+    sand_tons_raw = round(volume_m3 * 1.8 * 1.12, 2)
+    sand_tons = _round_sand_tons(sand_tons_raw)
 
     sand_cost = sand_tons * SAND_PRICE_PER_TON
 
@@ -80,7 +100,7 @@ def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: f
 
     return {
         "volume_m3": round(volume_m3, 2),
-        "sand_tons": round(sand_tons, 1),
+        "sand_tons": sand_tons,
         "sand_cost": round(sand_cost),
         "delivery": round(delivery),
         "extra": SAND_EXTRA,
@@ -119,11 +139,26 @@ def calc_cement(area_m2: float, thickness_mm: float, grade: str, is_city: bool, 
     else:
         if bags <= 35:
             delivery = 100 * distance_km + 2000
-        elif bags <= 65:
+        elif bags <= 60:
             delivery = 100 * distance_km * 2 + 1000
+        elif bags <= 105:
+            # Манипулятор малый (61-105 мешков)
+            delivery = 370 * distance_km + 2000
+        elif bags <= 206:
+            # Манипулятор средний (106-206 мешков)
+            delivery = 400 * distance_km + 2000
         else:
-            # ⚠️ Стоимость манипулятора в область — уточнить у РОПа!
-            delivery = 100 * distance_km * 2 + 2000
+            # 207+ мешков: манипулятор на 206 + остаток отдельной машиной
+            manip_delivery = 400 * distance_km + 2000
+            leftover = bags - 206
+            if leftover <= 35:
+                extra_delivery = 100 * distance_km + 2000
+            elif leftover <= 60:
+                extra_delivery = 100 * distance_km * 2 + 1000
+            else:
+                # Остаток тоже на манипулятор
+                extra_delivery = 370 * distance_km + 2000
+            delivery = manip_delivery + extra_delivery
 
     total = cement_cost + delivery
 
