@@ -477,7 +477,7 @@ async def handle_text(message: Message):
             "address": address,
             "object_type": object_type,
             "location_type": "город",
-            "floor": int(floor_val) if floor_val else 1,
+            "floor": int(float(floor_val)) if floor_val else 1,
         }
 
         # Формируем estimate (берём бюджет из сделки)
@@ -507,7 +507,7 @@ async def handle_text(message: Message):
             "estimate": estimate,
             "dist_materials": 0,
             "dist_equipment": 0,
-            "floor": int(floor_val) if floor_val else 1,
+            "floor": int(float(floor_val)) if floor_val else 1,
             "keramzit_area": 0,
             "keramzit_thick": 0,
             "sand_transport": None,
