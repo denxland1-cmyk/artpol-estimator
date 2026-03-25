@@ -540,16 +540,16 @@ async def on_confirm(callback: CallbackQuery):
             st["dist_equipment"] = dist_info["distance_km"]
         st["dist_materials"] = await get_materials_distance(coords["lat"], coords["lon"])
 
-    # Город = только НН и расстояние ≤ 20 км от базы
+    # Город = расстояние ≤ 20 км от базы
     # Всё что дальше 20 км — область (по километражу)
     max_dist = max(st["dist_equipment"], st["dist_materials"])
-    if max_dist > 20:
+    if max_dist > 0 and max_dist <= 20:
+        parsed["location_type"] = "город"
+        logger.info("Расстояние %.1f км ≤ 20 км → считаем как город", max_dist)
+    elif max_dist > 20:
         parsed["location_type"] = "за городом"
         logger.info("Расстояние %.1f км > 20 км → считаем как область", max_dist)
-    elif max_dist == 0 and parsed.get("location_type") == "за городом":
-        pass  # нет координат, верим парсеру
-    elif max_dist == 0:
-        pass  # город без координат — ОК
+    # max_dist == 0 — нет координат, верим парсеру
 
     is_city = parsed.get("location_type") != "за городом"
 
