@@ -15,7 +15,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from parser import process_measurement, get_distance_km, parse_passport_photo, parse_passport_text
+from parser import process_measurement, get_distance_km, parse_passport_photo, parse_passport_text, parse_kp_photo
 from database import init_db, save_measurement, update_measurement_status, close_db
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 from kp_generator import generate_kp
@@ -359,7 +359,7 @@ async def on_contract_from_amo(callback: CallbackQuery):
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    """Обработка фото — для распознавания паспорта."""
+    """Обработка фото — КП скриншот, паспорт."""
     user_id = message.from_user.id
 
     if not is_allowed(user_id):
@@ -367,6 +367,125 @@ async def handle_photo(message: Message):
         return
 
     st = user_state.get(user_id)
+
+    # Фото КП для договора из АМО?
+    if st and st.get("awaiting_kp_screenshot"):
+        st.pop("awaiting_kp_screenshot")
+        processing = await message.answer("⏳ Распознаю КП...")
+
+        try:
+            photo = message.photo[-1]
+            file = await bot.get_file(photo.file_id)
+            photo_bytes = await bot.download_file(file.file_path)
+            data = photo_bytes.read()
+
+            kp_data = await parse_kp_photo(data)
+
+            if kp_data.get("error"):
+                await processing.edit_text("❌ Не удалось распознать КП. Скинь скриншот чётче.")
+                st["awaiting_kp_screenshot"] = True
+                return
+
+            # Извлекаем данные из КП
+            client_name = kp_data.get("client_name", "")
+            address = kp_data.get("address", "")
+            area = kp_data.get("area_m2", 0)
+            thickness = kp_data.get("thickness_mm", 0)
+            grade = kp_data.get("grade", "М150")
+            grand_total = kp_data.get("grand_total", 0)
+            payment_type = kp_data.get("payment_type", "")
+
+            lead_id = st.get("amo_lead_id", 0)
+
+            # Формируем parsed
+            parsed = {
+                "client_name": client_name,
+                "client_phone": "",
+                "area_m2": float(area) if area else 0,
+                "thickness_mm_avg": float(thickness) if thickness else 0,
+                "address": address,
+                "object_type": "квартира",
+                "location_type": "город",
+                "floor": 1,
+            }
+
+            # Формируем estimate из КП
+            estimate = {
+                "grand_total": int(grand_total) if grand_total else 0,
+                "sand": {"total": 0, "sand_tons": 0, "sand_cost": 0, "delivery": 0, "extra": 0, "transport": "из КП", "volume_m3": 0},
+                "cement": {"total": 0, "bags": 0, "cement_cost": 0, "delivery": 0, "grade": grade or "М150"},
+                "fiber": {"cost": 0, "kg": 0},
+                "film": {"cost": 0, "m2": 0},
+                "izoflex": {"cost": 0, "meters": 0},
+                "equipment_delivery": {"cost": 0, "detail": "из КП"},
+                "work": {"cost": 0, "rate": "из КП", "floor_label": ""},
+                "keramzit": None,
+                "materials_total": 0,
+                "price_modifier": 0,
+            }
+
+            # Сохраняем в user_state
+            user_state[user_id] = {
+                "parsed": parsed,
+                "db_id": 0,
+                "created_at": "",
+                "grade": grade or "М150",
+                "modifier": 0,
+                "payment": "cash" if payment_type == "нал" else "bank" if payment_type == "безнал" else "",
+                "sand_removal": False,
+                "estimate": estimate,
+                "dist_materials": 0,
+                "dist_equipment": 0,
+                "floor": 1,
+                "keramzit_area": 0,
+                "keramzit_thick": 0,
+                "sand_transport": None,
+                "amo_lead_id": lead_id,
+                "from_amo_lead": True,
+            }
+            st = user_state[user_id]
+
+            # Показываем распознанные данные
+            summary = f"✅ <b>КП распознано (сделка #{lead_id})</b>\n\n"
+            if client_name:
+                summary += f"👤 {client_name}\n"
+            if address:
+                summary += f"📍 {address}\n"
+            if area:
+                summary += f"📐 Площадь: {area} м²\n"
+            if thickness:
+                summary += f"📏 Толщина: {thickness} мм\n"
+            if grade:
+                summary += f"🏷 Марка: {grade}\n"
+            if grand_total:
+                summary += f"💰 Итого: {int(grand_total):,}₽\n"
+
+            await processing.edit_text(summary, parse_mode=ParseMode.HTML)
+
+            # Если нет адреса — просим ввести
+            if not address:
+                st["awaiting_kp_address"] = True
+                await message.answer(
+                    "📍 <b>Адрес не найден в КП.</b>\n"
+                    "Введи адрес объекта:",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            # Запускаем FSM договора
+            st["contract_step"] = 0
+            st["contract_data"] = {}
+            _, prompt = CONTRACT_STEPS[0]
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
+            ])
+            await message.answer(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+        except Exception as e:
+            logger.error("Ошибка распознавания КП: %s", e, exc_info=True)
+            await processing.edit_text("❌ Ошибка. Попробуй другой скриншот.")
+            st["awaiting_kp_screenshot"] = True
+        return
 
     # Фото в контексте договора?
     if st and st.get("contract_step", -1) >= 0:
@@ -432,6 +551,23 @@ async def handle_text(message: Message):
             return
 
     # Ждём номер сделки АМО для договора?
+    if st and st.get("awaiting_kp_address"):
+        st.pop("awaiting_kp_address")
+        address = message.text.strip()
+        st["parsed"]["address"] = address
+        await message.answer(f"✅ Адрес: <b>{address}</b>", parse_mode=ParseMode.HTML)
+
+        # Запускаем FSM договора
+        st["contract_step"] = 0
+        st["contract_data"] = {}
+        _, prompt = CONTRACT_STEPS[0]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
+        ])
+        await message.answer(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # Ждём номер сделки АМО для договора?
     if st and st.get("awaiting_amo_lead_id"):
         st.pop("awaiting_amo_lead_id")
         text = message.text.strip().replace("#", "")
@@ -442,102 +578,13 @@ async def handle_text(message: Message):
             return
 
         lead_id = int(text)
-        processing = await message.answer(f"⏳ Загружаю сделку #{lead_id} из АМО...")
-
-        lead = await get_lead_by_id(lead_id)
-        if not lead:
-            await processing.edit_text(f"❌ Сделка #{lead_id} не найдена в АМО.")
-            return
-
-        # Извлекаем данные
-        lead_name = lead.get("name", "")
-        price = lead.get("price", 0)
-        area = lead.get("area")
-        thickness_raw = lead.get("thickness", "")
-        address = lead.get("address", "")
-        floor_val = lead.get("floor")
-        object_type = lead.get("object_type", "квартира")
-        client_name = lead.get("contact_name") or lead_name.split("+")[0].strip() or lead_name
-        phone = lead.get("phone", "")
-
-        # Парсим толщину из строки "80.0 мм"
-        import re
-        thickness = 0
-        if thickness_raw:
-            m = re.search(r"(\d+\.?\d*)", str(thickness_raw))
-            if m:
-                thickness = float(m.group(1))
-
-        # Формируем parsed для договора
-        parsed = {
-            "client_name": client_name,
-            "client_phone": phone,
-            "area_m2": float(area) if area else 0,
-            "thickness_mm_avg": thickness,
-            "address": address,
-            "object_type": object_type,
-            "location_type": "город",
-            "floor": int(float(floor_val)) if floor_val else 1,
-        }
-
-        # Формируем estimate (берём бюджет из сделки)
-        estimate = {
-            "grand_total": price,
-            "sand": {"total": 0, "sand_tons": 0, "sand_cost": 0, "delivery": 0, "extra": 0, "transport": "из АМО", "volume_m3": 0},
-            "cement": {"total": 0, "bags": 0, "cement_cost": 0, "delivery": 0, "grade": "М150"},
-            "fiber": {"cost": 0, "kg": 0},
-            "film": {"cost": 0, "m2": 0},
-            "izoflex": {"cost": 0, "meters": 0},
-            "equipment_delivery": {"cost": 0, "detail": "из АМО"},
-            "work": {"cost": 0, "rate": "из АМО", "floor_label": ""},
-            "keramzit": None,
-            "materials_total": 0,
-            "price_modifier": 0,
-        }
-
-        # Сохраняем в user_state
-        user_state[user_id] = {
-            "parsed": parsed,
-            "db_id": 0,
-            "created_at": "",
-            "grade": "М150",
-            "modifier": 0,
-            "payment": "cash",
-            "sand_removal": False,
-            "estimate": estimate,
-            "dist_materials": 0,
-            "dist_equipment": 0,
-            "floor": int(float(floor_val)) if floor_val else 1,
-            "keramzit_area": 0,
-            "keramzit_thick": 0,
-            "sand_transport": None,
-            "amo_lead_id": lead_id,
-            "from_amo_lead": True,
-        }
-        st = user_state[user_id]
-
-        # Показываем данные
-        summary = (
-            f"✅ <b>Сделка #{lead_id}</b>\n\n"
-            f"👤 {client_name}"
+        st["amo_lead_id"] = lead_id
+        st["awaiting_kp_screenshot"] = True
+        await message.answer(
+            f"✅ Сделка <b>#{lead_id}</b>\n\n"
+            "📸 Теперь скинь <b>скриншот КП</b> — я распознаю данные для договора.",
+            parse_mode=ParseMode.HTML,
         )
-        if phone:
-            summary += f" | {phone}"
-        summary += f"\n📍 {address}" if address else ""
-        summary += f"\n📐 Площадь: {area} м²" if area else ""
-        summary += f"\n📏 Толщина: {thickness_raw}" if thickness_raw else ""
-        summary += f"\n💰 Бюджет: {price:,}₽" if price else ""
-
-        await processing.edit_text(summary, parse_mode=ParseMode.HTML)
-
-        # Запускаем FSM договора
-        st["contract_step"] = 0
-        st["contract_data"] = {}
-        _, prompt = CONTRACT_STEPS[0]
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
-        ])
-        await message.answer(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     # Ждём дату/время для Кроноса?
@@ -1588,9 +1635,57 @@ async def on_confirm_contract(callback: CallbackQuery):
             caption=f"📋 Договор №{cd['contract_number']} — {cd['full_name']}"
         )
 
+        # Если договор из сделки АМО — показываем кнопку отправки
+        if st.get("amo_lead_id"):
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Отправить договор в АМО", callback_data="send_contract_to_amo")]
+            ])
+            await callback.message.answer(
+                "Договор готов! Отправить в сделку АМО?",
+                reply_markup=kb,
+            )
+
     except Exception as e:
         logger.error("Ошибка генерации договора: %s", e, exc_info=True)
         await callback.message.answer("❌ Ошибка генерации договора. Попробуй ещё раз.")
+
+
+@dp.callback_query(F.data == "send_contract_to_amo")
+async def on_send_contract_to_amo(callback: CallbackQuery):
+    """Отправляет договор в сделку АМО."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Нет данных.")
+        return
+
+    lead_id = st.get("amo_lead_id")
+    contract_path = st.get("contract_path")
+
+    if not lead_id or not contract_path:
+        await callback.answer("Нет сделки или договора.")
+        return
+
+    import os
+    if not os.path.exists(contract_path):
+        await callback.answer("Файл договора не найден.")
+        return
+
+    processing = await callback.message.edit_text("⏳ Отправляю договор в АМО...")
+
+    try:
+        contract_name = os.path.basename(contract_path)
+        await upload_file_to_lead(lead_id, contract_path, contract_name)
+        await processing.edit_text(
+            f"✅ <b>Договор отправлен в АМО!</b>\n"
+            f"📋 {contract_name}\n"
+            f"🔗 Сделка #{lead_id}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error("Ошибка отправки договора в АМО: %s", e, exc_info=True)
+        await processing.edit_text("❌ Ошибка отправки в АМО. Попробуй ещё раз.")
+
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "restart_contract")

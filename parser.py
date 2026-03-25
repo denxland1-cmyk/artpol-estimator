@@ -275,6 +275,83 @@ async def parse_passport_text(text: str) -> dict:
         return {"error": "api_failed", "detail": str(e)}
 
 
+# ---------- КП — распознавание скриншота ----------
+
+KP_PROMPT = """Ты — парсер коммерческого предложения (КП) на полусухую стяжку пола.
+Из скриншота КП извлеки данные и верни ТОЛЬКО валидный JSON.
+
+Формат ответа:
+{
+  "client_name": "строка" или null,
+  "address": "строка" или null,
+  "area_m2": число или null,
+  "thickness_mm": число или null,
+  "grade": "М150" или "М200" или null,
+  "grand_total": число или null,
+  "payment_type": "нал" или "безнал" или null,
+  "items": [
+    {"name": "строка", "quantity": "строка", "unit_price": число, "total": число},
+    ...
+  ]
+}
+
+Правила:
+- client_name: имя клиента из КП (обычно в шапке или заголовке)
+- address: адрес объекта
+- area_m2: площадь в м²
+- thickness_mm: толщина слоя в мм
+- grade: марка прочности (М150 или М200)
+- grand_total: итоговая сумма в рублях (число, без пробелов и знака ₽)
+- payment_type: если указан способ оплаты
+- items: позиции сметы (песок, цемент, фибра, плёнка, работы и т.д.)
+- Если данные не читаются — верни null для соответствующего поля
+- Не выдумывай данные. Извлекай только то, что видишь.
+"""
+
+
+async def parse_kp_photo(photo_bytes: bytes, media_type: str = "image/jpeg") -> dict:
+    """Распознаёт скриншот КП через Claude Vision."""
+    try:
+        b64 = base64.b64encode(photo_bytes).decode("utf-8")
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            system=KP_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": "Извлеки данные из этого КП."},
+                ],
+            }],
+        )
+
+        raw = response.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0]
+
+        parsed = json.loads(raw)
+        logger.info("КП распознано: %s", json.dumps(parsed, ensure_ascii=False))
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error("КП: невалидный JSON: %s | raw: %s", e, raw)
+        return {"error": "parse_failed"}
+    except Exception as e:
+        logger.error("КП: ошибка API: %s", e)
+        return {"error": "api_failed", "detail": str(e)}
+
+
 # ---------- Полный пайплайн ----------
 
 
