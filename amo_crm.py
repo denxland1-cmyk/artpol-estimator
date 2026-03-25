@@ -128,6 +128,60 @@ async def format_pipelines() -> str:
     return "\n".join(lines)
 
 
+# ========== Получение сделки по ID ==========
+
+async def get_lead_by_id(lead_id: int) -> dict | None:
+    """
+    Получает сделку по ID с контактами.
+    Возвращает dict с полями сделки или None.
+    """
+    data = await _amo_get(f"/leads/{lead_id}", params={"with": "contacts"})
+    if data.get("error"):
+        logger.error("AMO: ошибка получения сделки #%s: %s", lead_id, data)
+        return None
+
+    if not data.get("id"):
+        return None
+
+    # Извлекаем кастомные поля
+    custom = {}
+    for cf in data.get("custom_fields_values") or []:
+        fid = cf.get("field_id")
+        vals = cf.get("values", [])
+        val = vals[0].get("value") if vals else None
+        custom[fid] = val
+
+    result = {
+        "id": data["id"],
+        "name": data.get("name", ""),
+        "price": data.get("price", 0),
+        "area": custom.get(FIELD_AREA),
+        "floor": custom.get(FIELD_FLOOR),
+        "address": custom.get(FIELD_ADDRESS),
+        "thickness": custom.get(FIELD_THICKNESS),
+        "object_type": custom.get(FIELD_OBJECT_TYPE),
+        "info": custom.get(FIELD_INFO),
+    }
+
+    # Получаем контакт (телефон)
+    contacts = data.get("_embedded", {}).get("contacts", [])
+    if contacts:
+        contact_id = contacts[0].get("id")
+        if contact_id:
+            contact_data = await _amo_get(f"/contacts/{contact_id}")
+            if not contact_data.get("error"):
+                result["contact_name"] = contact_data.get("name", "")
+                for cf in contact_data.get("custom_fields_values") or []:
+                    code = cf.get("field_code", "")
+                    if code == "PHONE":
+                        vals = cf.get("values", [])
+                        result["phone"] = vals[0].get("value", "") if vals else ""
+                        break
+
+    logger.info("AMO: получена сделка #%s '%s', бюджет=%s", result["id"], result["name"], result["price"])
+    return result
+
+
 # ========== Поиск сделки по телефону ==========
 
 async def find_lead_by_phone(phone: str) -> dict | None:

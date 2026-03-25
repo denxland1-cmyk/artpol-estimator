@@ -156,7 +156,10 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
         logger.warning("Не нашёл п.2.1 для вставки таблицы")
         return
 
+    # Если данные из АМО (без детализации) — пропускаем таблицу
     s = estimate["sand"]
+    if s.get("sand_tons", 0) == 0 and s.get("sand_cost", 0) == 0:
+        return
     c = estimate["cement"]
     f = estimate["fiber"]
     fl = estimate["film"]
