@@ -184,11 +184,85 @@ def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: f
 # ЦЕМЕНТ
 # ============================================================
 
+def _oblast_cement_manipulator_rate(bags: int, distance_km: float) -> int:
+    """Тариф манипулятора цемент в области: ₽/км по мешкам и расстоянию."""
+    if bags <= 100:
+        if distance_km <= 34:
+            return 410
+        elif distance_km <= 49:
+            return 360
+        elif distance_km <= 79:
+            return 270
+        else:
+            return 230
+    elif bags <= 200:
+        if distance_km <= 34:
+            return 510
+        elif distance_km <= 49:
+            return 410
+        elif distance_km <= 79:
+            return 330
+        else:
+            return 260
+    else:  # 201-240
+        if distance_km <= 34:
+            return 650
+        elif distance_km <= 49:
+            return 470
+        elif distance_km <= 79:
+            return 390
+        else:
+            return 290
+
+
+def _oblast_cement_delivery(bags: int, distance_km: float) -> int:
+    """Рассчитывает доставку цемента в область для заданного кол-ва мешков."""
+    if bags <= 35:
+        return round(100 * distance_km + 2000)
+    elif bags <= 60:
+        return round(100 * distance_km * 2 + 1000)
+    elif bags <= 240:
+        rate = _oblast_cement_manipulator_rate(bags, distance_km)
+        return round(rate * distance_km + 1000)
+    else:
+        # 241+: манипулятор на 240 + остаток подходящей машиной
+        manip_rate = _oblast_cement_manipulator_rate(240, distance_km)
+        manip_delivery = round(manip_rate * distance_km + 1000)
+        leftover = bags - 240
+        extra_delivery = _oblast_cement_delivery(leftover, distance_km)
+        return manip_delivery + extra_delivery
+
+
+def _city_cement_delivery(bags: int) -> int:
+    """Рассчитывает доставку цемента в городе для заданного кол-ва мешков."""
+    if bags <= 35:
+        return 3500
+    elif bags <= 60:
+        return 7000
+    elif bags <= 105:
+        return 10000  # манипулятор 8000 + 2000
+    elif bags <= 206:
+        return 12000  # манипулятор 10000 + 2000
+    elif bags <= 240:
+        return 15000  # манипулятор 13000 + 2000
+    else:
+        # 241+: манипулятор на 240 + остаток
+        manip = 15000
+        leftover = bags - 240
+        extra = _city_cement_delivery(leftover)
+        return manip + extra
+
+
 def calc_cement(area_m2: float, thickness_mm: float, grade: str, is_city: bool, distance_km: float = 0) -> dict:
     """
     Расчёт цемента: количество мешков, стоимость, доставка.
     grade: "М150" или "М200"
     distance_km — от Окской Гавани до объекта (для области).
+
+    Город: до 35=3500, 36-60=7000, 61-105=10000, 106-206=12000, 207-240=15000, 241+=2 рейса
+    Область газель: до 35=100×км+2000, 36-60=100×км×2+1000
+    Область манипулятор (61-240): тариф×км+1000 (тариф зависит от мешков и расстояния)
+    241+: манипулятор 240 + остаток подходящей машиной
     """
     volume = area_m2 * thickness_mm
     multiplier = 5 if grade == "М150" else 6
@@ -197,39 +271,9 @@ def calc_cement(area_m2: float, thickness_mm: float, grade: str, is_city: bool, 
     cement_cost = bags * CEMENT_PRICE_PER_BAG
 
     if is_city:
-        if bags <= 35:
-            delivery = 3500
-        elif bags <= 65:
-            delivery = 7000
-        elif bags <= 105:
-            delivery = 10000  # манипулятор 8000 + 2000
-        elif bags <= 206:
-            delivery = 12000  # манипулятор 10000 + 2000
-        else:
-            delivery = 15000  # манипулятор 13000 + 2000
+        delivery = _city_cement_delivery(bags)
     else:
-        if bags <= 35:
-            delivery = 100 * distance_km + 2000
-        elif bags <= 60:
-            delivery = 100 * distance_km * 2 + 1000
-        elif bags <= 105:
-            # Манипулятор малый (61-105 мешков)
-            delivery = 370 * distance_km + 2000
-        elif bags <= 206:
-            # Манипулятор средний (106-206 мешков)
-            delivery = 400 * distance_km + 2000
-        else:
-            # 207+ мешков: манипулятор на 206 + остаток отдельной машиной
-            manip_delivery = 400 * distance_km + 2000
-            leftover = bags - 206
-            if leftover <= 35:
-                extra_delivery = 100 * distance_km + 2000
-            elif leftover <= 60:
-                extra_delivery = 100 * distance_km * 2 + 1000
-            else:
-                # Остаток тоже на манипулятор
-                extra_delivery = 370 * distance_km + 2000
-            delivery = manip_delivery + extra_delivery
+        delivery = _oblast_cement_delivery(bags, distance_km)
 
     total = cement_cost + delivery
 
