@@ -66,37 +66,66 @@ def _round_sand_tons(tons: float) -> float:
         return whole + 1.0
 
 
+def _oblast_sand_delivery(tons: float, distance_km: float) -> tuple[int, str]:
+    """Рассчитывает доставку песка в область. Возвращает (стоимость, описание)."""
+    near = distance_km <= 30  # 20-30 км
+    if tons <= 5:
+        rate = 275 if near else 255
+    elif tons <= 18:
+        rate = 400 if near else 350
+    else:  # 19-30
+        rate = 500 if near else 400
+    cost = round(rate * distance_km)
+    label = f"{rate}₽×{distance_km}км"
+    return cost, label
+
+
+def _city_sand_delivery(tons: float) -> tuple[int, str]:
+    """Рассчитывает доставку песка в городе. Возвращает (стоимость, транспорт)."""
+    if tons <= 5:
+        return 4500, "ГАЗОН (до 5т)"
+    elif tons <= 18:
+        return 7500, "КАМАЗ (6-18т)"
+    else:  # 19-30
+        return 9000, "МАЗ (19-30т)"
+
+
 def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: float = 0, sand_transport: str = None) -> dict:
     """
     Расчёт песка: количество, стоимость, доставка.
     distance_km — от Окской Гавани до объекта (для области).
     sand_transport — "камаз" или "газон" если указан спецтранспорт.
     Формула: объём × 1.8 × 1.12, спецокругление до 0.5 т.
+
+    Город: до 5т=4500, 6-18т=7500, 19-30т=9000, всегда +1000₽
+    Область 20-30км: до 5т=275×км, 6-18т=400×км, 19-30т=500×км, без +1000
+    Область 31+км: до 5т=255×км, 6-18т=350×км, 19-30т=400×км, без +1000
+    >30т: 2 рейса (МАЗ 30т + остаток)
     """
     volume_m3 = area_m2 * thickness_mm / 1000
     sand_tons_raw = round(volume_m3 * 1.8 * 1.12, 2)
     sand_tons = _round_sand_tons(sand_tons_raw)
 
+    sand_cost = round(sand_tons * SAND_PRICE_PER_TON)
+
     # --- Спецтранспорт: песок на камазах / газонах ---
     if sand_transport in ("камаз", "газон"):
-        max_per_trip = 18 if sand_transport == "камаз" else 6
-        trip_delivery_city = 7000 if sand_transport == "камаз" else 5000
-        trip_delivery_oblast = 250 * distance_km  # до 19т тариф
+        max_per_trip = 18 if sand_transport == "камаз" else 5
 
         import math
         n_trips = math.ceil(sand_tons / max_per_trip)
         tons_per_trip = round(sand_tons / n_trips, 2)
 
-        sand_cost = 0
         delivery = 0
         extra = 0
         for _ in range(n_trips):
-            sand_cost += tons_per_trip * SAND_PRICE_PER_TON
             if is_city:
-                delivery += trip_delivery_city
+                d, _ = _city_sand_delivery(tons_per_trip)
+                delivery += d
+                extra += 1000
             else:
-                delivery += trip_delivery_oblast
-            extra += SAND_EXTRA
+                d, _ = _oblast_sand_delivery(tons_per_trip, distance_km)
+                delivery += d
 
         label = "КАМАЗ" if sand_transport == "камаз" else "ГАЗОН"
         transport = f"{n_trips}× {label} {tons_per_trip}т"
@@ -104,7 +133,7 @@ def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: f
         return {
             "volume_m3": round(volume_m3, 2),
             "sand_tons": sand_tons,
-            "sand_cost": round(sand_cost),
+            "sand_cost": sand_cost,
             "delivery": round(delivery),
             "extra": round(extra),
             "transport": transport,
@@ -112,61 +141,40 @@ def calc_sand(area_m2: float, thickness_mm: float, is_city: bool, distance_km: f
         }
 
     # --- Обычный расчёт ---
-    sand_cost = sand_tons * SAND_PRICE_PER_TON
+    extra = 0
 
     if is_city:
-        if sand_tons <= 6:
-            delivery = 5000
-            transport = "ГАЗОН (до 6т)"
-        elif sand_tons <= 18:
-            delivery = 7000
-            transport = "КАМАЗ (6-18т)"
-        elif sand_tons <= 30:
-            delivery = 9000
-            transport = "МАЗ (19-30т)"
+        if sand_tons <= 30:
+            delivery, transport = _city_sand_delivery(sand_tons)
+            extra = 1000
         else:
-            # Больше 30т — 2 рейса: МАЗ 30т + остаток
+            # >30т — 2 рейса: МАЗ 30т + остаток
             leftover = sand_tons - 30
-            first_trip = 9000  # МАЗ 30т
-            if leftover <= 6:
-                second_trip = 5000
-                second_label = "ГАЗОН"
-            elif leftover <= 18:
-                second_trip = 7000
-                second_label = "КАМАЗ"
-            else:
-                second_trip = 9000
-                second_label = "МАЗ"
-            delivery = first_trip + second_trip
+            first_delivery, _ = _city_sand_delivery(30)  # 9000
+            second_delivery, second_label = _city_sand_delivery(leftover)
+            delivery = first_delivery + second_delivery
+            extra = 2000  # +1000 за каждый рейс
             transport = f"МАЗ 30т + {second_label} {leftover}т (2 рейса)"
     else:
-        if sand_tons <= 19:
-            delivery = 250 * distance_km
-            transport = f"Область до 19т (250₽×{distance_km}км)"
-        elif sand_tons <= 30:
-            delivery = 300 * distance_km
-            transport = f"Область 19-30т (300₽×{distance_km}км)"
+        if sand_tons <= 30:
+            delivery, label = _oblast_sand_delivery(sand_tons, distance_km)
+            transport = f"Область ({label})"
         else:
-            # Больше 30т — 2 рейса: МАЗ 30т + остаток
+            # >30т — 2 рейса
             leftover = sand_tons - 30
-            first_trip = 300 * distance_km  # МАЗ 30т
-            if leftover <= 19:
-                second_trip = 250 * distance_km
-                second_label = f"до 19т (250₽×{distance_km}км)"
-            else:
-                second_trip = 300 * distance_km
-                second_label = f"19-30т (300₽×{distance_km}км)"
-            delivery = first_trip + second_trip
-            transport = f"Область 30т + {leftover}т (2 рейса)"
+            first_delivery, first_label = _oblast_sand_delivery(30, distance_km)
+            second_delivery, second_label = _oblast_sand_delivery(leftover, distance_km)
+            delivery = first_delivery + second_delivery
+            transport = f"Область 30т+{leftover}т (2 рейса)"
 
-    total = sand_cost + delivery + SAND_EXTRA
+    total = sand_cost + delivery + extra
 
     return {
         "volume_m3": round(volume_m3, 2),
         "sand_tons": sand_tons,
-        "sand_cost": round(sand_cost),
+        "sand_cost": sand_cost,
         "delivery": round(delivery),
-        "extra": SAND_EXTRA,
+        "extra": extra,
         "transport": transport,
         "total": round(total),
     }
