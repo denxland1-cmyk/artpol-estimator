@@ -397,16 +397,41 @@ async def handle_photo(message: Message):
 
             lead_id = st.get("amo_lead_id", 0)
 
+            # Дополняем из AMO то, чего нет в КП
+            amo_data = st.get("amo_lead_data", {})
+            if amo_data:
+                if not address and amo_data.get("address"):
+                    address = amo_data["address"]
+                    logger.info("Адрес подтянут из AMO: %s", address)
+                if not client_name and amo_data.get("contact_name"):
+                    client_name = amo_data["contact_name"]
+                if not area and amo_data.get("area"):
+                    area = amo_data["area"]
+                if not thickness and amo_data.get("thickness"):
+                    # thickness в AMO хранится как строка "50 мм"
+                    try:
+                        thickness = float(str(amo_data["thickness"]).replace("мм", "").strip())
+                    except (ValueError, TypeError):
+                        pass
+
+            # Безопасно парсим этаж из AMO
+            _floor = 1
+            if amo_data and amo_data.get("floor"):
+                try:
+                    _floor = int(float(amo_data["floor"]))
+                except (ValueError, TypeError):
+                    _floor = 1
+
             # Формируем parsed
             parsed = {
                 "client_name": client_name,
-                "client_phone": "",
+                "client_phone": amo_data.get("phone", "") if amo_data else "",
                 "area_m2": float(area) if area else 0,
                 "thickness_mm_avg": float(thickness) if thickness else 0,
                 "address": address,
-                "object_type": "квартира",
+                "object_type": amo_data.get("object_type", "квартира") if amo_data else "квартира",
                 "location_type": "город",
-                "floor": 1,
+                "floor": _floor,
             }
 
             # Формируем estimate из КП
@@ -436,21 +461,27 @@ async def handle_photo(message: Message):
                 "estimate": estimate,
                 "dist_materials": 0,
                 "dist_equipment": 0,
-                "floor": 1,
+                "floor": parsed.get("floor", 1),
                 "keramzit_area": 0,
                 "keramzit_thick": 0,
                 "sand_transport": None,
                 "amo_lead_id": lead_id,
+                "amo_lead_data": amo_data,
                 "from_amo_lead": True,
             }
             st = user_state[user_id]
 
             # Показываем распознанные данные
+            amo_address_used = not kp_data.get("address") and address and amo_data.get("address")
+            phone = parsed.get("client_phone", "")
             summary = f"✅ <b>КП распознано (сделка #{lead_id})</b>\n\n"
             if client_name:
                 summary += f"👤 {client_name}\n"
+            if phone:
+                summary += f"📞 {phone} <i>(из АМО)</i>\n"
             if address:
-                summary += f"📍 {address}\n"
+                src = " <i>(из АМО)</i>" if amo_address_used else ""
+                summary += f"📍 {address}{src}\n"
             if area:
                 summary += f"📐 Площадь: {area} м²\n"
             if thickness:
@@ -466,7 +497,7 @@ async def handle_photo(message: Message):
             if not address:
                 st["awaiting_kp_address"] = True
                 await message.answer(
-                    "📍 <b>Адрес не найден в КП.</b>\n"
+                    "📍 <b>Адрес не найден в КП и в сделке АМО.</b>\n"
                     "Введи адрес объекта:",
                     parse_mode=ParseMode.HTML,
                 )
@@ -579,9 +610,42 @@ async def handle_text(message: Message):
 
         lead_id = int(text)
         st["amo_lead_id"] = lead_id
+
+        # Подтягиваем данные сделки из АМО
+        amo_lead = await get_lead_by_id(lead_id)
+        if amo_lead:
+            st["amo_lead_data"] = amo_lead
+            logger.info("AMO: данные сделки #%s загружены (адрес=%s)", lead_id, amo_lead.get("address"))
+        else:
+            st["amo_lead_data"] = {}
+            logger.warning("AMO: не удалось загрузить сделку #%s", lead_id)
+            await message.answer(
+                f"⚠️ Сделка #{lead_id} не найдена в АМО или ошибка доступа.\n"
+                "Продолжаю без данных АМО.",
+            )
+
         st["awaiting_kp_screenshot"] = True
+
+        # Показываем что нашли в AMO
+        amo_info = ""
+        if amo_lead:
+            parts = []
+            if amo_lead.get("name"):
+                parts.append(f"📋 {amo_lead['name']}")
+            if amo_lead.get("contact_name"):
+                parts.append(f"👤 {amo_lead['contact_name']}")
+            if amo_lead.get("phone"):
+                parts.append(f"📞 {amo_lead['phone']}")
+            if amo_lead.get("address"):
+                parts.append(f"📍 {amo_lead['address']}")
+            if amo_lead.get("price"):
+                parts.append(f"💰 {amo_lead['price']:,}₽")
+            if parts:
+                amo_info = "\n".join(parts) + "\n\n"
+
         await message.answer(
             f"✅ Сделка <b>#{lead_id}</b>\n\n"
+            f"{amo_info}"
             "📸 Теперь скинь <b>скриншот КП</b> — я распознаю данные для договора.",
             parse_mode=ParseMode.HTML,
         )
