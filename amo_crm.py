@@ -508,8 +508,11 @@ def build_smeta_fields(
     fields.append({"field_id": FIELD_SMETA_AREA_EPPS, "values": [{"value": 0}]})
     fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": "0"}]})
 
-    # === Вывоз песка (select Да/Нет) ===
+    # === Вывоз песка (select Есть/Нет) ===
     fields.append({"field_id": FIELD_SMETA_SAND_REMOVAL, "values": [{"value": "Есть" if sand_removal else "Нет"}]})
+
+    # === Факт доставка материала — начальное значение из сметы ===
+    fields.append({"field_id": FIELD_SMETA_FACT_DEL_MAT, "values": [{"value": delivery_material}]})
 
     # === Примечания — "без изменений" по умолчанию ===
     fields.append({"field_id": FIELD_SMETA_NOTES, "values": [{"value": "без изменений"}]})
