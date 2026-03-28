@@ -506,7 +506,7 @@ def build_smeta_fields(
     # Сетка обычно на той же площади что и керамзит
     fields.append({"field_id": FIELD_SMETA_AREA_MESH, "values": [{"value": k.get("mesh_m2", 0) if k else 0}]})
     fields.append({"field_id": FIELD_SMETA_AREA_EPPS, "values": [{"value": 0}]})
-    fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": 0}]})
+    fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": "0"}]})
 
     # === Вывоз песка (select Да/Нет) ===
     fields.append({"field_id": FIELD_SMETA_SAND_REMOVAL, "values": [{"value": "Да" if sand_removal else "Нет"}]})
