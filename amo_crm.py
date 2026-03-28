@@ -509,7 +509,7 @@ def build_smeta_fields(
     fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": "0"}]})
 
     # === Вывоз песка (select Да/Нет) ===
-    fields.append({"field_id": FIELD_SMETA_SAND_REMOVAL, "values": [{"value": "Да" if sand_removal else "Нет"}]})
+    fields.append({"field_id": FIELD_SMETA_SAND_REMOVAL, "values": [{"value": "Есть" if sand_removal else "Нет"}]})
 
     # === Примечания — "без изменений" по умолчанию ===
     fields.append({"field_id": FIELD_SMETA_NOTES, "values": [{"value": "без изменений"}]})
