@@ -34,6 +34,44 @@ FIELD_INFO = 657579           # Общая информация (textarea)
 FIELD_OBJECT_TYPE = 658967    # Тип объекта (text)
 FIELD_THICKNESS = 658969      # Толщина стяжки (text)
 
+# Группа СМЕТА — кастомные поля для сметных данных
+FIELD_SMETA_THICKNESS = 663353    # Толщина (мм) — numeric
+FIELD_SMETA_MATERIAL = 663355     # Материал — numeric
+FIELD_SMETA_DELIVERY_MAT = 663357 # Доставка материала — numeric
+FIELD_SMETA_WORK = 663359         # Работы (итого) — numeric
+FIELD_SMETA_EXTRAS = 663361       # Допы в смете — numeric
+FIELD_SMETA_DELIVERY_EQ = 663363  # Доставка оборудования — numeric
+FIELD_SMETA_SAND = 663365         # Песок (т) — numeric
+FIELD_SMETA_CEMENT = 663367       # Цемент (мешки) — numeric
+FIELD_SMETA_FIBER = 663369        # Фибра (кг) — numeric
+FIELD_SMETA_FILM = 663371         # Плёнка (м2) — numeric (старое поле, оставляем)
+FIELD_SMETA_FILM_TYPE = 663373    # Тип плёнки — select
+FIELD_SMETA_KERAMZIT = 663375     # Керамзит (мешки) — numeric
+FIELD_SMETA_MESH = 663377         # Сетка (м2) — numeric
+FIELD_SMETA_IZOFLEX = 663379      # Izoflex (п.м.) — numeric
+FIELD_SMETA_PAYMENT = 663383      # Тип оплаты — select
+
+# Новые поля СМЕТЫ (добавлены 28.03.2026)
+FIELD_SMETA_FILM_TECH = 663395    # Плёнка техническая (м2) — numeric
+FIELD_SMETA_FILM_ARM = 663397     # Плёнка армированная (м2) — numeric
+FIELD_SMETA_WORK_SCREED = 663449  # Работы стяжка — numeric
+FIELD_SMETA_WORK_KERAMZIT = 663453  # Работы керамзит — numeric
+FIELD_SMETA_SAND_REMOVAL = 663455 # Вывоз песка — select (Да/Нет)
+FIELD_SMETA_NOTES = 663457        # Примечания по объекту — text
+FIELD_SMETA_WORK_MESH = 663469    # Работы сетка — numeric
+FIELD_SMETA_WORK_EPPS = 663471    # Работы ЭППС — numeric
+FIELD_SMETA_WORK_SAND_BASE = 663473  # Работы песчаное основание — numeric
+FIELD_SMETA_AREA_KERAMZIT = 663483   # Площадь керамзит (м2) — numeric
+FIELD_SMETA_AREA_MESH = 663485       # Площадь сетка (м2) — numeric
+FIELD_SMETA_AREA_EPPS = 663487       # Площадь ЭППС (м2) — numeric
+FIELD_SMETA_AREA_SAND_BASE = 663489  # Площадь песчаное основание (м2) — numeric
+
+# Факт-поля (заполняются после выполнения работ, НЕ при создании сметы)
+FIELD_SMETA_FACT_DEL_MAT = 663459   # Факт доставка материала — numeric
+FIELD_SMETA_FACT_MATERIAL = 663461  # Факт материал — numeric
+FIELD_SMETA_FACT_WORK = 663465      # Факт работы — numeric
+FIELD_SMETA_FACT_DEL_EQ = 663467    # Факт доставка оборудования — numeric
+
 HEADERS = {
     "Authorization": f"Bearer {AMO_TOKEN}",
     "Content-Type": "application/json",
@@ -370,6 +408,127 @@ async def create_lead(name: str, price: int, status_id: int, custom_fields: list
     return await _amo_post("/leads", lead_data)
 
 
+# ========== Построение полей СМЕТЫ ==========
+
+def build_smeta_fields(
+    estimate: dict,
+    parsed: dict,
+    payment: str = "",
+    sand_removal: bool = False,
+) -> list:
+    """
+    Формирует кастомные поля группы СМЕТА из данных сметы.
+    Возвращает список для custom_fields_values.
+    """
+    if not estimate:
+        return []
+
+    s = estimate.get("sand", {})
+    c = estimate.get("cement", {})
+    f = estimate.get("fiber", {})
+    fl = estimate.get("film", {})
+    iz = estimate.get("izoflex", {})
+    eq = estimate.get("equipment_delivery", {})
+    w = estimate.get("work", {})
+    k = estimate.get("keramzit")
+
+    thickness = parsed.get("thickness_mm_avg", 0) or 0
+    keramzit_data = parsed.get("keramzit") or {}
+
+    # Материал = все материалы БЕЗ доставки материала и доставки оборудования
+    material = (
+        s.get("total", 0)           # Песок (цена + доставка в одной строке)
+        + c.get("cement_cost", 0)    # Цемент
+        + f.get("cost", 0)           # Фибра
+        + fl.get("cost", 0)          # Плёнка техническая
+        + iz.get("cost", 0)          # Izoflex
+    )
+    if k:
+        material += k.get("keramzit_cost", 0)          # Керамзит
+        material += k.get("reinforced_film_cost", 0)    # Арм. плёнка
+        material += k.get("mesh_cost", 0)               # Сетка
+
+    # Доставка материала
+    delivery_material = c.get("delivery", 0)
+
+    # Работы стяжка
+    work_screed = w.get("cost", 0)
+
+    # Работы керамзит
+    work_keramzit = k.get("keramzit_work_cost", 0) if k else 0
+
+    # Допы в смете = сумма всех доп. работ
+    extras = work_keramzit
+    if sand_removal:
+        extras += 5000
+
+    # Доставка оборудования
+    delivery_eq = eq.get("cost", 0)
+
+    # === Основные поля ===
+    fields = [
+        {"field_id": FIELD_SMETA_THICKNESS, "values": [{"value": thickness}]},
+        {"field_id": FIELD_SMETA_MATERIAL, "values": [{"value": material}]},
+        {"field_id": FIELD_SMETA_DELIVERY_MAT, "values": [{"value": delivery_material}]},
+        {"field_id": FIELD_SMETA_WORK, "values": [{"value": work_screed}]},
+        {"field_id": FIELD_SMETA_EXTRAS, "values": [{"value": extras}]},
+        {"field_id": FIELD_SMETA_DELIVERY_EQ, "values": [{"value": delivery_eq}]},
+        {"field_id": FIELD_SMETA_SAND, "values": [{"value": s.get("sand_tons", 0)}]},
+        {"field_id": FIELD_SMETA_CEMENT, "values": [{"value": c.get("bags", 0)}]},
+        {"field_id": FIELD_SMETA_FIBER, "values": [{"value": f.get("kg", 0)}]},
+        {"field_id": FIELD_SMETA_IZOFLEX, "values": [{"value": iz.get("meters", 0)}]},
+    ]
+
+    # === Плёнка: техническая + армированная ===
+    fields.append({"field_id": FIELD_SMETA_FILM_TECH, "values": [{"value": fl.get("m2", 0)}]})
+    if k:
+        fields.append({"field_id": FIELD_SMETA_FILM_ARM, "values": [{"value": k.get("reinforced_film_m2", 0)}]})
+    else:
+        fields.append({"field_id": FIELD_SMETA_FILM_ARM, "values": [{"value": 0}]})
+
+    # === Керамзит, сетка ===
+    if k:
+        fields.append({"field_id": FIELD_SMETA_KERAMZIT, "values": [{"value": k.get("keramzit_bags", 0)}]})
+        fields.append({"field_id": FIELD_SMETA_MESH, "values": [{"value": k.get("mesh_m2", 0)}]})
+    else:
+        fields.append({"field_id": FIELD_SMETA_KERAMZIT, "values": [{"value": 0}]})
+        fields.append({"field_id": FIELD_SMETA_MESH, "values": [{"value": 0}]})
+
+    # === Работы (детализация) ===
+    fields.append({"field_id": FIELD_SMETA_WORK_SCREED, "values": [{"value": work_screed}]})
+    fields.append({"field_id": FIELD_SMETA_WORK_KERAMZIT, "values": [{"value": work_keramzit}]})
+    fields.append({"field_id": FIELD_SMETA_WORK_MESH, "values": [{"value": 0}]})        # пока не в калькуляторе
+    fields.append({"field_id": FIELD_SMETA_WORK_EPPS, "values": [{"value": 0}]})        # пока не в калькуляторе
+    fields.append({"field_id": FIELD_SMETA_WORK_SAND_BASE, "values": [{"value": 0}]})   # пока не в калькуляторе
+
+    # === Площади доп. работ ===
+    ker_area = keramzit_data.get("area_m2", 0)
+    fields.append({"field_id": FIELD_SMETA_AREA_KERAMZIT, "values": [{"value": ker_area}]})
+    # Сетка обычно на той же площади что и керамзит
+    fields.append({"field_id": FIELD_SMETA_AREA_MESH, "values": [{"value": k.get("mesh_m2", 0) if k else 0}]})
+    fields.append({"field_id": FIELD_SMETA_AREA_EPPS, "values": [{"value": 0}]})
+    fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": 0}]})
+
+    # === Вывоз песка (select Да/Нет) ===
+    fields.append({"field_id": FIELD_SMETA_SAND_REMOVAL, "values": [{"value": "Да" if sand_removal else "Нет"}]})
+
+    # === Примечания — "без изменений" по умолчанию ===
+    fields.append({"field_id": FIELD_SMETA_NOTES, "values": [{"value": "без изменений"}]})
+
+    # === Тип оплаты ===
+    if payment:
+        payment_text = "наличный" if payment == "наличными" else "безналичный" if payment == "безналичный расчет" else ""
+        if payment_text:
+            fields.append({"field_id": FIELD_SMETA_PAYMENT, "values": [{"value": payment_text}]})
+
+    logger.info(
+        "СМЕТА: материал=%s, дост_мат=%s, работы=%s (стяжка=%s, керамзит=%s), допы=%s, обор=%s",
+        material, delivery_material, work_screed + work_keramzit, work_screed, work_keramzit, extras, delivery_eq,
+    )
+
+    return fields
+
+
 # ========== Основная функция: заполнить AMO ==========
 
 async def fill_amo_lead(
@@ -384,6 +543,10 @@ async def fill_amo_lead(
     measurement_datetime: str,
     measurement_timestamp: int = None,
     client_name: str = "",
+    estimate: dict = None,
+    parsed: dict = None,
+    payment: str = "",
+    sand_removal: bool = False,
 ) -> dict:
     """
     Находит сделку по телефону и заполняет данные.
@@ -399,6 +562,16 @@ async def fill_amo_lead(
         {"field_id": FIELD_THICKNESS, "values": [{"value": f"{thickness} мм"}]},
         {"field_id": FIELD_INFO, "values": [{"value": raw_text}]},
     ]
+
+    # 1b. Добавляем поля СМЕТЫ если есть данные
+    if estimate and parsed:
+        smeta_fields = build_smeta_fields(
+            estimate=estimate,
+            parsed=parsed,
+            payment=payment,
+            sand_removal=sand_removal,
+        )
+        custom_fields.extend(smeta_fields)
 
     if measurement_timestamp:
         custom_fields.append(
