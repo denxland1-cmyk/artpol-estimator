@@ -1070,6 +1070,10 @@ async def on_fill_amo(callback: CallbackQuery):
         measurement_datetime=measurement_dt,
         measurement_timestamp=measurement_ts,
         client_name=parsed.get("client_name", ""),
+        estimate=estimate,
+        parsed=parsed,
+        payment=st.get("payment", ""),
+        sand_removal=st.get("sand_removal", False),
     )
 
     if result.get("success"):
@@ -1099,12 +1103,13 @@ async def on_fill_amo(callback: CallbackQuery):
         if files_sent:
             files_info = f"\n📎 Прикреплено: {', '.join(files_sent)}"
 
+        smeta_info = "\n📊 Поля СМЕТЫ заполнены" if estimate else ""
         action = "✨ Создана новая" if result.get("created_new") else "🔄 Обновлена"
         await processing.edit_text(
             f"✅ <b>АМО {action.split()[1]}!</b>\n\n"
-            f"📊 Сделка: {result['lead_name']}\n"
+            f"🔗 Сделка #{lead_id}: {result['lead_name']}\n"
             f"💰 Бюджет: {total:,}₽\n"
-            f"📍 Статус: → Сделано предложение{files_info}",
+            f"📍 Статус: → Сделано предложение{smeta_info}{files_info}",
             parse_mode=ParseMode.HTML,
         )
     elif result.get("error") == "not_found":
