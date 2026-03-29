@@ -317,9 +317,9 @@ def generate_contract(
     doc = Document(str(TEMPLATE_PATH))
 
     # --- Данные ---
-    area = parsed.get("area_m2", 0)
-    thickness = parsed.get("thickness_mm_avg", 0)
-    address = parsed.get("address", "___")
+    area = parsed.get("area_m2", 0) or 0
+    thickness = parsed.get("thickness_mm_avg", 0) or 0
+    address = parsed.get("address") or "___"
 
     total = estimate["grand_total"]
     if include_sand_removal:
@@ -328,16 +328,16 @@ def generate_contract(
     total_words = _num_to_words(total)
     total_formatted = f"{total:,}".replace(",", " ")
 
-    full_name = client_data.get("full_name", "___")
-    passport_series = client_data.get("passport_series", "____")
-    passport_number = client_data.get("passport_number", "______")
+    full_name = client_data.get("full_name") or "___"
+    passport_series = client_data.get("passport_series") or "____"
+    passport_number = client_data.get("passport_number") or "______"
     passport = f"{passport_series} {passport_number}"
-    issued_by = client_data.get("passport_issued_by", "___")
-    passport_date = client_data.get("passport_date", "___")
-    reg_address = client_data.get("registration_address", "___")
+    issued_by = client_data.get("passport_issued_by") or "___"
+    passport_date = client_data.get("passport_date") or "___"
+    reg_address = client_data.get("registration_address") or "___"
 
-    contract_num = client_data.get("contract_number", "___")
-    contract_date = client_data.get("contract_date", "")
+    contract_num = client_data.get("contract_number") or "___"
+    contract_date = client_data.get("contract_date") or ""
     if not contract_date:
         now = datetime.now(MSK)
         contract_date = f"{now.day:02d}.{now.month:02d}.{now.year}"
@@ -349,9 +349,9 @@ def generate_contract(
     except Exception:
         date_header = contract_date
 
-    work_start = client_data.get("work_start_date", "___")
-    work_end = client_data.get("work_end_date", "___")
-    payment_terms = client_data.get("payment_terms", "___")
+    work_start = client_data.get("work_start_date") or "___"
+    work_end = client_data.get("work_end_date") or "___"
+    payment_terms = client_data.get("payment_terms") or "___"
 
     # Фамилия И.О.
     name_parts = full_name.split()
