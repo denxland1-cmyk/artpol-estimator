@@ -397,9 +397,16 @@ async def create_lead(name: str, price: int, status_id: int, custom_fields: list
             },
         }]
         result = await _amo_post("/leads/complex", complex_data)
+        # /leads/complex может вернуть list (ID сделок) или dict с ошибкой
+        if isinstance(result, list):
+            # Успех — список ID
+            if result:
+                lead_id = result[0].get("id") if isinstance(result[0], dict) else result[0]
+                return {"success": True, "lead_id": lead_id}
+            return {"error": "create_failed", "detail": "Пустой ответ от AMO"}
         if not result.get("error"):
-            # complex возвращает список ID
-            lead_ids = result if isinstance(result, list) else result.get("_embedded", {}).get("leads", [])
+            # complex возвращает dict с _embedded
+            lead_ids = result.get("_embedded", {}).get("leads", [])
             if lead_ids:
                 lead_id = lead_ids[0].get("id") if isinstance(lead_ids[0], dict) else lead_ids[0]
                 return {"success": True, "lead_id": lead_id}
