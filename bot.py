@@ -241,9 +241,12 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
 
     # Сформировать КП — доступна только если выбран способ оплаты
     if payment:
+        amo_lead_id = st.get("amo_lead_id")
+        amo_btn = f"🔗 Сделка #{amo_lead_id} ✓" if amo_lead_id else "🔗 Указать сделку АМО"
         rows.append([InlineKeyboardButton(text="📄 Сформировать КП", callback_data="generate_kp")])
         rows.append([InlineKeyboardButton(text="📋 Сформировать договор", callback_data="start_contract")])
         rows.append([InlineKeyboardButton(text="📊 Заполнить АМО", callback_data="fill_amo")])
+        rows.append([InlineKeyboardButton(text=amo_btn, callback_data="set_amo_lead")])
         rows.append([InlineKeyboardButton(text="📅 Записать в Кронос", callback_data="start_kronos")])
 
     # Новый замер
@@ -596,6 +599,25 @@ async def handle_text(message: Message):
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
         ])
         await message.answer(prompt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # Ждём номер сделки АМО для заполнения?
+    if st and st.get("awaiting_amo_lead_for_fill"):
+        st.pop("awaiting_amo_lead_for_fill")
+        text = message.text.strip().replace("#", "").replace("https://artpol.amocrm.ru/leads/detail/", "")
+
+        if not text.isdigit():
+            await message.answer("❌ Введи номер сделки (только цифры).")
+            st["awaiting_amo_lead_for_fill"] = True
+            return
+
+        lead_id = int(text)
+        st["amo_lead_id"] = lead_id
+        await message.answer(
+            f"✅ Сделка <b>#{lead_id}</b> привязана.\n"
+            "Теперь нажми <b>📊 Заполнить АМО</b> — данные запишутся в эту сделку.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     # Ждём номер сделки АМО для договора?
@@ -997,6 +1019,40 @@ async def on_generate_kp(callback: CallbackQuery):
         await callback.message.answer("❌ Ошибка генерации КП. Попробуй ещё раз.")
 
 
+# --- Фейковые номера ---
+FAKE_PHONES = {"89999999999", "79999999999", "+79999999999", "80000000000", "70000000000", "+70000000000"}
+
+def is_fake_phone(phone: str) -> bool:
+    """Проверяет, является ли телефон фейковым (Avito-сделка без номера)."""
+    if not phone:
+        return True
+    clean = phone.replace("+", "").replace(" ", "").replace("-", "")
+    if clean in {p.replace("+", "") for p in FAKE_PHONES}:
+        return True
+    # Все цифры одинаковые (типа 88888888888)
+    if len(clean) >= 10 and len(set(clean[-10:])) == 1:
+        return True
+    return False
+
+
+# --- Указать сделку АМО ---
+@dp.callback_query(F.data == "set_amo_lead")
+async def on_set_amo_lead(callback: CallbackQuery):
+    """Менеджер указывает номер сделки АМО вручную."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    st["awaiting_amo_lead_for_fill"] = True
+    await callback.message.answer(
+        "🔗 Введи <b>номер сделки АМО</b> (только цифры):\n"
+        "Например: 29420847",
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
 # --- Заполнить АМО ---
 @dp.callback_query(F.data == "fill_amo")
 async def on_fill_amo(callback: CallbackQuery):
@@ -1007,13 +1063,30 @@ async def on_fill_amo(callback: CallbackQuery):
 
     parsed = st["parsed"]
     phone = parsed.get("client_phone", "")
-    if not phone:
-        await callback.answer("❌ Нет телефона клиента в замере!")
-        await callback.message.answer("❌ Телефон клиента не найден в замере. АМО не может найти сделку без телефона.")
+    direct_lead_id = st.get("amo_lead_id")
+
+    # Если телефон фейковый и нет привязанной сделки — просим номер сделки
+    if is_fake_phone(phone) and not direct_lead_id:
+        await callback.answer("❌ Фейковый номер!")
+        st["awaiting_amo_lead_for_fill"] = True
+        await callback.message.answer(
+            "📵 Телефон <b>" + (phone or "не указан") + "</b> — фейковый (Avito-сделка).\n\n"
+            "🔗 Введи <b>номер сделки АМО</b> для записи данных:",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    await callback.answer("⏳ Ищу сделку в АМО...")
-    processing = await callback.message.answer("🔍 Ищу сделку в АМО по номеру " + phone + "...")
+    if not phone and not direct_lead_id:
+        await callback.answer("❌ Нет телефона клиента в замере!")
+        await callback.message.answer("❌ Телефон клиента не найден в замере. Укажи номер сделки кнопкой 🔗.")
+        return
+
+    if direct_lead_id:
+        await callback.answer("⏳ Обновляю сделку #" + str(direct_lead_id) + "...")
+        processing = await callback.message.answer(f"🔗 Обновляю сделку <b>#{direct_lead_id}</b> в АМО...", parse_mode=ParseMode.HTML)
+    else:
+        await callback.answer("⏳ Ищу сделку в АМО...")
+        processing = await callback.message.answer("🔍 Ищу сделку в АМО по номеру " + phone + "...")
 
     estimate = st["estimate"]
     total = estimate["grand_total"]
@@ -1074,6 +1147,7 @@ async def on_fill_amo(callback: CallbackQuery):
         parsed=parsed,
         payment=st.get("payment", ""),
         sand_removal=st.get("sand_removal", False),
+        lead_id=direct_lead_id,
     )
 
     if result.get("success"):

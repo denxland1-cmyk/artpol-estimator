@@ -546,9 +546,11 @@ async def fill_amo_lead(
     parsed: dict = None,
     payment: str = "",
     sand_removal: bool = False,
+    lead_id: int = None,
 ) -> dict:
     """
     Находит сделку по телефону и заполняет данные.
+    Если lead_id указан — обновляет напрямую, без поиска по телефону.
     Если не найдена — создаёт новую.
     Двигает в "Сделано предложение".
     """
@@ -577,7 +579,42 @@ async def fill_amo_lead(
             {"field_id": FIELD_MEASUREMENT_DT, "values": [{"value": measurement_timestamp}]}
         )
 
-    # 2. Ищем сделку
+    # 2. Если указан lead_id — обновляем напрямую
+    if lead_id:
+        logger.info("AMO: обновляем сделку #%s напрямую (по ID)", lead_id)
+        lead_data = await get_lead_by_id(lead_id)
+        lead_name = lead_data.get("name", f"#{lead_id}") if lead_data else f"#{lead_id}"
+
+        update_result = await update_lead(
+            lead_id=lead_id,
+            price=price,
+            status_id=STATUS_OFFER_MADE,
+            custom_fields=custom_fields,
+        )
+        if update_result.get("error"):
+            return {"error": "update_failed", "detail": str(update_result)}
+
+        # Примечание
+        note_text = (
+            f"📋 ЗАМЕР от {measurement_datetime}\n"
+            f"📐 Площадь: {area} м²\n"
+            f"📏 Толщина: {thickness} мм\n"
+            f"🏢 Этаж: {floor}\n"
+            f"🏘 Адрес: {address}\n"
+            f"💰 Бюджет: {price:,}₽\n\n"
+            f"--- Текст замера ---\n{raw_text}"
+        )
+        await add_note_to_lead(lead_id, note_text)
+
+        logger.info("AMO: сделка #%s обновлена → 'Сделано предложение', бюджет %s₽", lead_id, price)
+        return {
+            "success": True,
+            "lead_id": lead_id,
+            "lead_name": lead_name,
+            "created_new": False,
+        }
+
+    # 3. Ищем сделку по телефону
     lead = await find_lead_by_phone(phone)
     created_new = False
 
