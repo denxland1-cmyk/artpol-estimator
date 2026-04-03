@@ -381,8 +381,23 @@ def generate_contract(
     _replace_in_doc(doc, "составляет м2", f"составляет {area} м2")
 
     # Толщина п.1.2.1
-    _replace_in_doc(doc, "составляет  мм", f"составляет {thickness} мм")
-    _replace_in_doc(doc, "составляет мм", f"составляет {thickness} мм")
+    ker_data = parsed.get("keramzit") or {}
+    ker_thick = ker_data.get("thickness_mm", 0)
+
+    if ker_thick:
+        ker_area = ker_data.get("area_m2", 0)
+        # С керамзитом: площадь и толщина керамзитного основания
+        _replace_in_doc(doc, "составляет  мм",
+                        f"составляет {thickness} мм.\n"
+                        f"Площадь керамзитного основания составляет {ker_area} м2, "
+                        f"средняя толщина керамзитного основания составляет {ker_thick}мм")
+        _replace_in_doc(doc, "составляет мм",
+                        f"составляет {thickness} мм.\n"
+                        f"Площадь керамзитного основания составляет {ker_area} м2, "
+                        f"средняя толщина керамзитного основания составляет {ker_thick}мм")
+    else:
+        _replace_in_doc(doc, "составляет  мм", f"составляет {thickness} мм")
+        _replace_in_doc(doc, "составляет мм", f"составляет {thickness} мм")
 
     # Сумма п.2.1
     _replace_in_doc(doc, "(тысяч) рублей 00 копеек",
@@ -392,8 +407,14 @@ def generate_contract(
     _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, include_sand_removal)
 
     # Толщина п.2.5
-    _replace_in_doc(doc, "средней толщине стяжки  мм", f"средней толщине стяжки {thickness} мм")
-    _replace_in_doc(doc, "средней толщине стяжки мм", f"средней толщине стяжки {thickness} мм")
+    if ker_thick:
+        _replace_in_doc(doc, "средней толщине стяжки  мм",
+                        f"средней толщине стяжки {thickness}мм и средней толщины керамзитного основания {ker_thick}мм")
+        _replace_in_doc(doc, "средней толщине стяжки мм",
+                        f"средней толщине стяжки {thickness}мм и средней толщины керамзитного основания {ker_thick}мм")
+    else:
+        _replace_in_doc(doc, "средней толщине стяжки  мм", f"средней толщине стяжки {thickness} мм")
+        _replace_in_doc(doc, "средней толщине стяжки мм", f"средней толщине стяжки {thickness} мм")
 
     # Дата начала работ п.3.1 и завершения п.3.2
     # Текст разбит по runs — заменяем напрямую
