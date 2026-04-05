@@ -114,7 +114,7 @@ async def create_event(
             ]
         },
         "contact": {
-            "name": contact_name or "Клиент",
+            "name": contact_name or "Заказчик",
             "phone": contact_phone or "",
         },
     }

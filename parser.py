@@ -395,9 +395,9 @@ async def process_measurement(text: str) -> dict:
     # --- Определяем недостающие обязательные поля ---
     missing = []
     if not parsed.get("client_name"):
-        missing.append("имя клиента")
+        missing.append("имя заказчика")
     if not parsed.get("client_phone"):
-        missing.append("телефон клиента")
+        missing.append("телефон заказчика")
     if not parsed.get("area_m2"):
         missing.append("площадь (м²)")
     if parsed.get("thickness_mm_avg") is None:

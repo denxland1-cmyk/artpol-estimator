@@ -105,7 +105,7 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
             parts.append(data["client_name"])
         if data.get("client_phone"):
             parts.append(data["client_phone"])
-        lines.append(f"👤 Клиент: {' | '.join(parts)}")
+        lines.append(f"👤 Заказчик: {' | '.join(parts)}")
 
     if data.get("object_type"):
         lines.append(f"🏠 Тип: {data['object_type']}")
@@ -742,7 +742,7 @@ async def handle_text(message: Message):
             # Пересчитываем missing_fields
             required = []
             if not old.get("client_name") and not old.get("client_phone"):
-                required.append("имя или телефон клиента")
+                required.append("имя или телефон заказчика")
             if not old.get("area_m2"):
                 required.append("площадь (м²)")
             if not old.get("thickness_mm_avg") and not old.get("zones"):
@@ -1070,8 +1070,8 @@ async def on_fill_amo(callback: CallbackQuery):
         return
 
     if not phone and not direct_lead_id:
-        await callback.answer("❌ Нет телефона клиента в замере!")
-        await callback.message.answer("❌ Телефон клиента не найден в замере. Укажи номер сделки кнопкой 🔗.")
+        await callback.answer("❌ Нет телефона заказчика в замере!")
+        await callback.message.answer("❌ Телефон заказчика не найден в замере. Укажи номер сделки кнопкой 🔗.")
         return
 
     if direct_lead_id:
@@ -1102,7 +1102,7 @@ async def on_fill_amo(callback: CallbackQuery):
         # Форматируем из parsed
         lines = []
         if parsed.get("client_name"):
-            lines.append(f"Клиент: {parsed['client_name']}")
+            lines.append(f"Заказчик: {parsed['client_name']}")
         if phone:
             lines.append(f"Тел: {phone}")
         if parsed.get("object_type"):
@@ -1229,7 +1229,7 @@ async def _do_kronos_create(message_or_callback, st, date_str, day, month, year,
     parsed = st.get("parsed", {})
     address = parsed.get("address", "Адрес не указан")
     phone = parsed.get("client_phone", "")
-    client_name = parsed.get("client_name", "Клиент")
+    client_name = parsed.get("client_name", "Заказчик")
 
     # Определяем куда писать
     if hasattr(message_or_callback, 'message'):
