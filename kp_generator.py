@@ -334,7 +334,8 @@ def generate_kp(
     ], shade=GRAY_HEADER)
 
     # Вывоз песка (опционально)
-    sand_removal_cost = 5000
+    is_beznal = estimate.get("payment_type") == "безналичный расчет"
+    sand_removal_cost = round(5000 * 1.5) if is_beznal else 5000
     if include_sand_removal:
         _add_row(table, [
             ("Вывоз\\довоз песка", False, L),
@@ -418,6 +419,10 @@ def generate_kp(
 
     _add_para(doc, f"! Оплата производится {payment_type}",
               bold=True, size=10, space_after=2)
+
+    if is_beznal:
+        _add_para(doc, "! В стоимость включен НДС 22%",
+                  bold=True, size=10, space_after=2)
 
     _add_para(doc,
         "! Мы дарим Вам возможность приобретать любые товары в любых "

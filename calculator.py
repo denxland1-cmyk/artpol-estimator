@@ -501,6 +501,7 @@ def calculate_estimate(
     keramzit_thickness_mm: float = 0,
     price_modifier: float = 0,
     sand_transport: str = None,
+    payment_type: str = "",
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -517,6 +518,7 @@ def calculate_estimate(
     - keramzit_thickness_mm: толщина слоя керамзита в мм
     - price_modifier: скидка/наценка в % (например -5 = скидка 5%, +3 = наценка 3%)
     - sand_transport: "камаз" / "газон" / None — спецтранспорт для песка
+    - payment_type: "" / "наличными" / "безналичный расчет"
     """
     # Коэффициент цены: -5% → 0.95, +3% → 1.03
     k = 1 + price_modifier / 100 if price_modifier != 0 else 1
@@ -592,6 +594,47 @@ def calculate_estimate(
     if k != 1:
         film["cost"] = round(film["cost"] * k)
 
+    # ============================================================
+    # БЕЗНАЛИЧНЫЙ РАСЧЁТ — наценки после всех расчётов
+    # ============================================================
+    is_beznal = payment_type == "безналичный расчет"
+
+    if is_beznal:
+        # ×1.1 — материалы (песок с доставкой, цемент, фибра, плёнка, izoflex)
+        sand["sand_cost"] = round(sand["sand_cost"] * 1.1)
+        sand["delivery"] = round(sand["delivery"] * 1.1)
+        sand["extra"] = round(sand["extra"] * 1.1)
+        sand["total"] = sand["sand_cost"] + sand["delivery"] + sand["extra"]
+
+        cement["cement_cost"] = round(cement["cement_cost"] * 1.1)
+
+        fiber["cost"] = round(fiber["cost"] * 1.1)
+        film["cost"] = round(film["cost"] * 1.1)
+        izoflex["cost"] = round(izoflex["cost"] * 1.1)
+
+        if has_keramzit and keramzit:
+            keramzit["keramzit_cost"] = round(keramzit["keramzit_cost"] * 1.1)
+            keramzit["reinforced_film_cost"] = round(keramzit["reinforced_film_cost"] * 1.1)
+            keramzit["mesh_cost"] = round(keramzit["mesh_cost"] * 1.1)
+
+        # ×1.5 — доставки и работы
+        cement["delivery"] = round(cement["delivery"] * 1.5)
+        cement["total"] = cement["cement_cost"] + cement["delivery"]
+
+        equipment["cost"] = round(equipment["cost"] * 1.5)
+
+        work["cost"] = round(work["cost"] * 1.5)
+        # Обновляем rate для отображения
+        if "фикс" in work.get("rate", ""):
+            work["rate"] = f"фикс {work['cost']}₽"
+        else:
+            new_rate = round(work["cost"] / area_m2) if area_m2 > 0 else 0
+            work["rate"] = f"{new_rate}₽/м²"
+
+        if has_keramzit and keramzit:
+            keramzit["keramzit_work_cost"] = round(keramzit["keramzit_work_cost"] * 1.5)
+            keramzit["keramzit_work_rate"] = round(keramzit["keramzit_work_rate"] * 1.5)
+
     # Итого материалы
     materials_total = (
         sand["total"]
@@ -623,6 +666,7 @@ def calculate_estimate(
         "work": work,
         "keramzit": keramzit,
         "price_modifier": price_modifier,
+        "payment_type": payment_type,
         "materials_total": round(materials_total),
         "grand_total": round(grand_total),
     }
@@ -695,6 +739,10 @@ def format_estimate(est: dict) -> str:
         lines.append(f"💰 <b>ИТОГО (наценка +{mod}%): {est['grand_total']:,}₽</b>")
     else:
         lines.append(f"💰 <b>ИТОГО: {est['grand_total']:,}₽</b>")
+
+    if est.get("payment_type") == "безналичный расчет":
+        lines.append("")
+        lines.append("📋 <i>В стоимость включен НДС 22%</i>")
 
     return "\n".join(lines)
 

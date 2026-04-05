@@ -163,8 +163,11 @@ def format_full_estimate(st: dict) -> str:
     lines = [format_estimate(est)]
 
     if sand_removal:
-        total_with_sand = est["grand_total"] + 5000
-        lines.append(f"\n🚛 + Вывоз песка: 5,000₽")
+        # Вывоз песка ×1.5 при безнале
+        is_beznal = est.get("payment_type") == "безналичный расчет"
+        sand_removal_cost = round(5000 * 1.5) if is_beznal else 5000
+        total_with_sand = est["grand_total"] + sand_removal_cost
+        lines.append(f"\n🚛 + Вывоз песка: {sand_removal_cost:,}₽")
         lines.append(f"💰 <b>ИТОГО с вывозом: {total_with_sand:,}₽</b>")
 
     return "\n".join(lines)
@@ -274,6 +277,7 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
         keramzit_thickness_mm=st.get("keramzit_thick", 0),
         price_modifier=st.get("modifier", 0),
         sand_transport=st.get("sand_transport"),
+        payment_type=st.get("payment", ""),
     )
     st["estimate"] = estimate
 
@@ -566,6 +570,7 @@ async def handle_text(message: Message):
                 keramzit_thickness_mm=st.get("keramzit_thick", 0),
                 price_modifier=st.get("modifier", 0),
                 sand_transport=st.get("sand_transport"),
+                payment_type=st.get("payment", ""),
             )
             st["estimate"] = estimate
 
@@ -1091,7 +1096,8 @@ async def on_fill_amo(callback: CallbackQuery):
     estimate = st["estimate"]
     total = estimate["grand_total"]
     if st.get("sand_removal"):
-        total += 5000
+        is_beznal = estimate.get("payment_type") == "безналичный расчет"
+        total += round(5000 * 1.5) if is_beznal else 5000
 
     # Дата и время первого замера
     created = st.get("created_at")
@@ -1459,6 +1465,16 @@ async def on_start_contract(callback: CallbackQuery):
     st = user_state.get(callback.from_user.id)
     if not st or not st.get("estimate"):
         await callback.answer("Сначала рассчитай смету.")
+        return
+
+    # Безнал — договор для юрлиц в разработке
+    if st.get("payment") == "безналичный расчет":
+        await callback.answer("🔧 В разработке")
+        await callback.message.answer(
+            "🔧 <b>Договор для безналичного расчёта находится в разработке.</b>\n"
+            "Заказчик — юрлицо, шаблон договора будет добавлен позже.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     st["contract_step"] = 0
