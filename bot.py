@@ -920,20 +920,8 @@ async def on_payment(callback: CallbackQuery):
         return
     st["payment"] = "наличными" if callback.data == "pay_cash" else "безналичный расчет"
 
-    # Обновляем клавиатуру без пересчёта сметы
-    parsed = st["parsed"]
-    header = format_parsed_result(parsed, db_id=st["db_id"], created_at=st["created_at"])
-    estimate_text = format_full_estimate(st)
-    keyboard = get_estimate_keyboard(st)
-
-    try:
-        await callback.message.edit_text(
-            header + "\n\n" + estimate_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
-    except Exception:
-        pass
+    # Пересчитываем смету (безнал меняет цены)
+    await recalc_and_show(callback, st)
     await callback.answer(f"Оплата: {st['payment']}")
 
 
