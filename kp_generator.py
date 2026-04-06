@@ -417,7 +417,8 @@ def generate_kp(
         _add_para(doc, "! Вывоз остатков песка и строительного мусора не входит в стоимость",
                   bold=True, size=10, space_before=4, space_after=2)
 
-    _add_para(doc, f"! Оплата производится {payment_type}",
+    payment_label = "по безналичному расчету" if payment_type == "безналичный расчет" else payment_type
+    _add_para(doc, f"! Оплата производится {payment_label}",
               bold=True, size=10, space_after=2)
 
     if is_beznal:
