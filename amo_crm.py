@@ -467,7 +467,8 @@ def build_smeta_fields(
     # Допы в смете = сумма всех доп. работ
     extras = work_keramzit
     if sand_removal:
-        extras += 5000
+        is_beznal = payment == "безналичный расчет"
+        extras += round(6000 * 1.5) if is_beznal else 6000
 
     # Доставка оборудования
     delivery_eq = eq.get("cost", 0)

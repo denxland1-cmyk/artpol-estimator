@@ -165,7 +165,7 @@ def format_full_estimate(st: dict) -> str:
     if sand_removal:
         # Вывоз песка ×1.5 при безнале
         is_beznal = est.get("payment_type") == "безналичный расчет"
-        sand_removal_cost = round(5000 * 1.5) if is_beznal else 5000
+        sand_removal_cost = round(6000 * 1.5) if is_beznal else 6000
         total_with_sand = est["grand_total"] + sand_removal_cost
         lines.append(f"\n🚛 + Вывоз песка: {sand_removal_cost:,}₽")
         lines.append(f"💰 <b>ИТОГО с вывозом: {total_with_sand:,}₽</b>")
@@ -239,7 +239,12 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
     ])
 
     # Вывоз песка
-    sand_txt = "🟢 Вывоз песка: ДА (+5,000₽) ✓" if sand else "Вывоз песка: НЕТ"
+    if sand:
+        is_beznal = payment == "безналичный расчет"
+        sand_price = round(6000 * 1.5) if is_beznal else 6000
+        sand_txt = f"🟢 Вывоз песка: ДА (+{sand_price:,}₽) ✓"
+    else:
+        sand_txt = "Вывоз песка: НЕТ"
     rows.append([InlineKeyboardButton(text=sand_txt, callback_data="sand_toggle")])
 
     # Сформировать КП — доступна только если выбран способ оплаты
@@ -979,7 +984,7 @@ async def on_generate_kp(callback: CallbackQuery):
 
         total = estimate["grand_total"]
         if st.get("sand_removal"):
-            total += 5000
+            total += 6000
 
         # Населённый пункт из location_type
         loc = parsed.get("location_type", "город")
@@ -1085,7 +1090,7 @@ async def on_fill_amo(callback: CallbackQuery):
     total = estimate["grand_total"]
     if st.get("sand_removal"):
         is_beznal = estimate.get("payment_type") == "безналичный расчет"
-        total += round(5000 * 1.5) if is_beznal else 5000
+        total += round(6000 * 1.5) if is_beznal else 6000
 
     # Дата и время первого замера
     created = st.get("created_at")

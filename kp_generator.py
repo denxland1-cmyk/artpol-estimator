@@ -335,7 +335,7 @@ def generate_kp(
 
     # Вывоз песка (опционально)
     is_beznal = estimate.get("payment_type") == "безналичный расчет"
-    sand_removal_cost = round(5000 * 1.5) if is_beznal else 5000
+    sand_removal_cost = round(6000 * 1.5) if is_beznal else 6000
     if include_sand_removal:
         _add_row(table, [
             ("Вывоз\\довоз песка", False, L),

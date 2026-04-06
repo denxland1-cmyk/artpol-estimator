@@ -262,7 +262,7 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
     # Вывоз песка
     if include_sand_removal:
         add_row([("Вывоз\\довоз песка", False, L), ("", False, C),
-                 ("", False, R), ("", False, R), ("5000", False, R)])
+                 ("", False, R), ("", False, R), ("6000", False, R)])
 
     # Работа керамзит
     if k:
@@ -278,7 +278,7 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
     # ИТОГО
     grand = estimate["grand_total"]
     if include_sand_removal:
-        grand += 5000
+        grand += 6000
     add_row([("", False, L), ("", False, C), ("", False, R),
              ("ИТОГО стяжка", True, R), (f"{grand}", True, R)])
 
@@ -323,7 +323,7 @@ def generate_contract(
 
     total = estimate["grand_total"]
     if include_sand_removal:
-        total += 5000
+        total += 6000
 
     total_words = _num_to_words(total)
     total_formatted = f"{total:,}".replace(",", " ")
