@@ -49,6 +49,7 @@ PARSER_SYSTEM_PROMPT = """\
   "address": "строка" или null,
   "coordinates": {"lat": число, "lon": число} или null,
   "sand_transport": "камаз" | "газон" | null,
+  "mesh": {"material_m2": число, "work_m2": число} или null,
   "special_conditions": ["строка", ...] или []
 }
 
@@ -88,6 +89,12 @@ PARSER_SYSTEM_PROMPT = """\
 - keramzit: керамзитное основание. Если в тексте упоминается керамзит/керамзитное основание с площадью и толщиной слоя — верни {"area_m2": число, "thickness_mm": число}. Площадь керамзита может отличаться от площади стяжки! Толщину в см переводи в мм. Если керамзит не упомянут — null.
 - special_conditions: список особых условий (этаж, подъём материалов, демонтаж, вывоз остатков песка и т.д.)
 - sand_transport: если в тексте указано "песок на камазах" → "камаз", "песок на газонах" / "песок на газиках" → "газон". Иначе null.
+- mesh: укладка мет. сетки и арм. плёнки БЕЗ керамзита.
+  Если в тексте упоминается "сетка", "арм.плёнка", "с нас сетка и плёнка", "укладка сетки":
+  - material_m2: площадь МАТЕРИАЛА сетки (если указана отдельно, например "сетка 33 м2")
+  - work_m2: площадь РАБОТЫ по укладке сетки (если указана отдельно, например "работа по укладке сетки 63 м2"). Если не указана — равна общей площади объекта.
+  ВАЖНО: если керамзит УЖЕ НАСЫПАН заказчиком ("керамзит насыпан", "керамзит клиента"), то keramzit = null, но mesh заполняется!
+  Если mesh не упомянут — null.
 
 Если параметр не упомянут — ставь null (для массива — пустой []).
 Не выдумывай данные. Извлекай только то, что явно есть в тексте.
@@ -359,6 +366,100 @@ async def parse_kp_photo(photo_bytes: bytes, media_type: str = "image/jpeg") -> 
     except Exception as e:
         logger.error("КП: ошибка API: %s", e)
         return {"error": "api_failed", "detail": str(e)}
+
+
+# ---------- РЕКВИЗИТЫ ЮРЛИЦА — парсинг текста ----------
+
+REQUISITES_PROMPT = """Ты — парсер реквизитов юридического лица. Из текста извлеки данные и верни ТОЛЬКО валидный JSON.
+
+Формат ответа:
+{
+  "org_name": "ООО «Название»",
+  "director_title": "Директор" или "Генеральный директор" или другая должность,
+  "director_name": "Фамилия Имя Отчество" в ИМЕНИТЕЛЬНОМ падеже,
+  "director_basis": "Устава" или "Доверенности №...",
+  "email": "email@example.com" или null,
+  "legal_address": "полный юридический адрес",
+  "inn": "ИНН (10 или 12 цифр)",
+  "kpp": "КПП (9 цифр)" или null,
+  "ogrn": "ОГРН (13 или 15 цифр)" или null,
+  "bank_account": "расчётный счёт (20 цифр)",
+  "bank_name": "Название банка",
+  "corr_account": "корреспондентский счёт (20 цифр)" или null,
+  "bik": "БИК (9 цифр)"
+}
+
+Правила:
+- org_name: полное название с формой (ООО, ИП, АО и т.д.). Если ИП — "ИП Фамилия Имя Отчество"
+- director_title: именно должность — "Директор", "Генеральный директор", "Управляющий" и т.д.
+- director_name: ФИО в ИМЕНИТЕЛЬНОМ падеже (Иванов Иван Иванович, не Иванова Ивана Ивановича)
+- email: если указан в тексте
+- legal_address: полный юридический адрес
+- inn: только цифры
+- kpp: только цифры (у ИП может не быть — null)
+- ogrn: только цифры
+- bank_account: р/с, только цифры
+- bank_name: полное название банка
+- corr_account: к/с, только цифры
+- bik: только цифры
+- Не выдумывай данные. Извлекай только то, что есть в тексте.
+- Если данных нет — ставь null.
+"""
+
+
+async def parse_requisites(text: str) -> dict:
+    """Парсит реквизиты юрлица из текста менеджера."""
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=REQUISITES_PROMPT,
+            messages=[{"role": "user", "content": text}],
+        )
+
+        raw = response.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0]
+
+        parsed = json.loads(raw)
+        logger.info("Реквизиты распознаны: %s", json.dumps(parsed, ensure_ascii=False))
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error("Реквизиты: невалидный JSON: %s | raw: %s", e, raw)
+        return {"error": "parse_failed"}
+    except Exception as e:
+        logger.error("Реквизиты: ошибка API: %s", e)
+        return {"error": "api_failed", "detail": str(e)}
+
+
+async def get_director_genitive(name: str, title: str = "Директор") -> dict:
+    """
+    Склоняет ФИО директора и должность в родительный падеж.
+    Возвращает {"name_genitive": "Иванова Ивана Ивановича", "title_genitive": "Директора"}
+    """
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            system="Склони в РОДИТЕЛЬНЫЙ падеж. Верни ТОЛЬКО JSON: {\"name_genitive\": \"...\", \"title_genitive\": \"...\"}",
+            messages=[{"role": "user", "content": f"Должность: {title}\nФИО: {name}"}],
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0]
+
+        result = json.loads(raw)
+        logger.info("Склонение: %s %s → %s %s", title, name, result.get("title_genitive"), result.get("name_genitive"))
+        return result
+
+    except Exception as e:
+        logger.error("Склонение: ошибка — %s", e)
+        return {"name_genitive": name, "title_genitive": title + "а"}
 
 
 # ---------- Полный пайплайн ----------

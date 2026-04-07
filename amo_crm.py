@@ -438,6 +438,7 @@ def build_smeta_fields(
     eq = estimate.get("equipment_delivery", {})
     w = estimate.get("work", {})
     k = estimate.get("keramzit")
+    m = estimate.get("mesh")
 
     thickness = parsed.get("thickness_mm_avg", 0) or 0
     keramzit_data = parsed.get("keramzit") or {}
@@ -454,6 +455,9 @@ def build_smeta_fields(
         material += k.get("keramzit_cost", 0)          # Керамзит
         material += k.get("reinforced_film_cost", 0)    # Арм. плёнка
         material += k.get("mesh_cost", 0)               # Сетка
+    if m:
+        material += m.get("reinforced_film_cost", 0)    # Арм. плёнка (без керамзита)
+        material += m.get("mesh_cost", 0)               # Сетка (без керамзита)
 
     # Доставка материала
     delivery_material = c.get("delivery", 0)
@@ -466,6 +470,8 @@ def build_smeta_fields(
 
     # Допы в смете = сумма всех доп. работ
     extras = work_keramzit
+    if m:
+        extras += m.get("mesh_work_cost", 0)
     if sand_removal:
         is_beznal = payment == "безналичный расчет"
         extras += round(6000 * 1.5) if is_beznal else 6000
@@ -490,6 +496,8 @@ def build_smeta_fields(
     fields.append({"field_id": FIELD_SMETA_FILM_TECH, "values": [{"value": fl.get("m2", 0)}]})
     if k:
         fields.append({"field_id": FIELD_SMETA_FILM_ARM, "values": [{"value": k.get("reinforced_film_m2", 0)}]})
+    elif m:
+        fields.append({"field_id": FIELD_SMETA_FILM_ARM, "values": [{"value": m.get("reinforced_film_m2", 0)}]})
     else:
         fields.append({"field_id": FIELD_SMETA_FILM_ARM, "values": [{"value": 0}]})
 
@@ -497,6 +505,9 @@ def build_smeta_fields(
     if k:
         fields.append({"field_id": FIELD_SMETA_KERAMZIT, "values": [{"value": k.get("keramzit_bags", 0)}]})
         fields.append({"field_id": FIELD_SMETA_MESH, "values": [{"value": k.get("mesh_m2", 0)}]})
+    elif m:
+        fields.append({"field_id": FIELD_SMETA_KERAMZIT, "values": [{"value": 0}]})
+        fields.append({"field_id": FIELD_SMETA_MESH, "values": [{"value": m.get("mesh_m2", 0)}]})
     else:
         fields.append({"field_id": FIELD_SMETA_KERAMZIT, "values": [{"value": 0}]})
         fields.append({"field_id": FIELD_SMETA_MESH, "values": [{"value": 0}]})
@@ -504,15 +515,14 @@ def build_smeta_fields(
     # === Работы (детализация) ===
     fields.append({"field_id": FIELD_SMETA_WORK_SCREED, "values": [{"value": work_screed}]})
     fields.append({"field_id": FIELD_SMETA_WORK_KERAMZIT, "values": [{"value": work_keramzit}]})
-    fields.append({"field_id": FIELD_SMETA_WORK_MESH, "values": [{"value": 0}]})        # пока не в калькуляторе
-    fields.append({"field_id": FIELD_SMETA_WORK_EPPS, "values": [{"value": 0}]})        # пока не в калькуляторе
-    fields.append({"field_id": FIELD_SMETA_WORK_SAND_BASE, "values": [{"value": 0}]})   # пока не в калькуляторе
+    fields.append({"field_id": FIELD_SMETA_WORK_MESH, "values": [{"value": m.get("mesh_work_cost", 0) if m else 0}]})
+    fields.append({"field_id": FIELD_SMETA_WORK_EPPS, "values": [{"value": 0}]})
+    fields.append({"field_id": FIELD_SMETA_WORK_SAND_BASE, "values": [{"value": 0}]})
 
     # === Площади доп. работ ===
     ker_area = keramzit_data.get("area_m2", 0)
     fields.append({"field_id": FIELD_SMETA_AREA_KERAMZIT, "values": [{"value": ker_area}]})
-    # Сетка обычно на той же площади что и керамзит
-    fields.append({"field_id": FIELD_SMETA_AREA_MESH, "values": [{"value": k.get("mesh_m2", 0) if k else 0}]})
+    fields.append({"field_id": FIELD_SMETA_AREA_MESH, "values": [{"value": m.get("work_m2", 0) if m else (k.get("mesh_m2", 0) if k else 0)}]})
     fields.append({"field_id": FIELD_SMETA_AREA_EPPS, "values": [{"value": 0}]})
     fields.append({"field_id": FIELD_SMETA_AREA_SAND_BASE, "values": [{"value": "0"}]})
 

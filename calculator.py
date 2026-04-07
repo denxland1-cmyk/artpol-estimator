@@ -502,6 +502,8 @@ def calculate_estimate(
     price_modifier: float = 0,
     sand_transport: str = None,
     payment_type: str = "",
+    mesh_material_m2: float = 0,
+    mesh_work_m2: float = 0,
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -519,6 +521,8 @@ def calculate_estimate(
     - price_modifier: скидка/наценка в % (например -5 = скидка 5%, +3 = наценка 3%)
     - sand_transport: "камаз" / "газон" / None — спецтранспорт для песка
     - payment_type: "" / "наличными" / "безналичный расчет"
+    - mesh_material_m2: площадь материала сетки (м²), 0 = без сетки
+    - mesh_work_m2: площадь работы по укладке сетки (м²), 0 = без сетки
     """
     # Коэффициент цены: -5% → 0.95, +3% → 1.03
     k = 1 + price_modifier / 100 if price_modifier != 0 else 1
@@ -595,6 +599,36 @@ def calculate_estimate(
         film["cost"] = round(film["cost"] * k)
 
     # ============================================================
+    # СЕТКА + АРМ. ПЛЁНКА (без керамзита)
+    # ============================================================
+    has_mesh = mesh_material_m2 > 0 and not has_keramzit
+    mesh_data = None
+
+    if has_mesh:
+        mesh_data = {
+            "material_m2": mesh_material_m2,
+            "work_m2": mesh_work_m2 or area_m2,
+            "reinforced_film_m2": mesh_material_m2,
+            "reinforced_film_cost": round(mesh_material_m2 * REINFORCED_FILM_PRICE_PER_M2),
+            "mesh_m2": mesh_material_m2,
+            "mesh_cost": round(mesh_material_m2 * METAL_MESH_PRICE_PER_M2),
+            "mesh_work_rate": 170,
+            "mesh_work_cost": round((mesh_work_m2 or area_m2) * 170),
+        }
+
+        # Техн. плёнка уменьшается на арм. плёнку
+        film["m2"] = round(max(0, film["m2"] - mesh_material_m2), 1)
+        film["cost"] = round(film["m2"] * FILM_PRICE_PER_M2)
+
+        # Применяем коэффициент скидки/наценки
+        if k != 1:
+            mesh_data["reinforced_film_cost"] = round(mesh_data["reinforced_film_cost"] * k)
+            mesh_data["mesh_cost"] = round(mesh_data["mesh_cost"] * k)
+            mesh_data["mesh_work_cost"] = round(mesh_data["mesh_work_cost"] * k)
+            mesh_data["mesh_work_rate"] = round(170 * k)
+            film["cost"] = round(film["cost"] * k)
+
+    # ============================================================
     # БЕЗНАЛИЧНЫЙ РАСЧЁТ — наценки после всех расчётов
     # ============================================================
     is_beznal = payment_type == "безналичный расчет"
@@ -617,6 +651,10 @@ def calculate_estimate(
             keramzit["reinforced_film_cost"] = round(keramzit["reinforced_film_cost"] * 1.1)
             keramzit["mesh_cost"] = round(keramzit["mesh_cost"] * 1.1)
 
+        if has_mesh and mesh_data:
+            mesh_data["reinforced_film_cost"] = round(mesh_data["reinforced_film_cost"] * 1.1)
+            mesh_data["mesh_cost"] = round(mesh_data["mesh_cost"] * 1.1)
+
         # ×1.5 — доставки и работы
         cement["delivery"] = round(cement["delivery"] * 1.5)
         cement["total"] = cement["cement_cost"] + cement["delivery"]
@@ -635,6 +673,10 @@ def calculate_estimate(
             keramzit["keramzit_work_cost"] = round(keramzit["keramzit_work_cost"] * 1.5)
             keramzit["keramzit_work_rate"] = round(keramzit["keramzit_work_rate"] * 1.5)
 
+        if has_mesh and mesh_data:
+            mesh_data["mesh_work_cost"] = round(mesh_data["mesh_work_cost"] * 1.5)
+            mesh_data["mesh_work_rate"] = round(mesh_data["mesh_work_rate"] * 1.5)
+
     # Итого материалы
     materials_total = (
         sand["total"]
@@ -651,10 +693,18 @@ def calculate_estimate(
             + keramzit["keramzit_cost"]
         )
 
+    if has_mesh and mesh_data:
+        materials_total += (
+            mesh_data["reinforced_film_cost"]
+            + mesh_data["mesh_cost"]
+        )
+
     # Итого всё
     grand_total = materials_total + equipment["cost"] + work["cost"]
     if has_keramzit:
         grand_total += keramzit["keramzit_work_cost"]
+    if has_mesh and mesh_data:
+        grand_total += mesh_data["mesh_work_cost"]
 
     result = {
         "sand": sand,
@@ -665,18 +715,24 @@ def calculate_estimate(
         "equipment_delivery": equipment,
         "work": work,
         "keramzit": keramzit,
+        "mesh": mesh_data,
         "price_modifier": price_modifier,
         "payment_type": payment_type,
         "materials_total": round(materials_total),
         "grand_total": round(grand_total),
     }
 
+    extra_info = ""
+    if has_keramzit:
+        extra_info += f", керамзит {keramzit_area_m2}м²×{keramzit_thickness_mm}мм"
+    if has_mesh:
+        extra_info += f", сетка {mesh_material_m2}м² (работа {mesh_work_m2}м²)"
+
     logger.info(
         "Смета: %s м², %s мм, %s, %s, этаж %d%s → итого %s₽",
         area_m2, thickness_mm,
         "город" if is_city else f"область ({distance_materials_km}км)",
-        grade, floor,
-        f", керамзит {keramzit_area_m2}м²×{keramzit_thickness_mm}мм" if has_keramzit else "",
+        grade, floor, extra_info,
         f"{grand_total:,.0f}",
     )
 
@@ -697,6 +753,7 @@ def format_estimate(est: dict) -> str:
     eq = est["equipment_delivery"]
     w = est["work"]
     k = est.get("keramzit")
+    m = est.get("mesh")
 
     lines = [
         "💰 <b>СМЕТА:</b>",
@@ -716,6 +773,10 @@ def format_estimate(est: dict) -> str:
         lines.append(f"    Арм. плёнка: {k['reinforced_film_m2']}м² = {k['reinforced_film_cost']:,}₽")
         lines.append(f"    Мет. сетка: {k['mesh_m2']}м² = {k['mesh_cost']:,}₽")
 
+    if m:
+        lines.append(f"🔲 Арм. плёнка: {m['reinforced_film_m2']}м² = {m['reinforced_film_cost']:,}₽")
+        lines.append(f"🔲 Мет. сетка: {m['mesh_m2']}м² = {m['mesh_cost']:,}₽")
+
     lines.append(f"🚛 Доставка материалов: {c['delivery']:,}₽")
     lines.append(f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})")
 
@@ -727,6 +788,8 @@ def format_estimate(est: dict) -> str:
     lines.append("🏗 <b>Работы:</b>")
     if k:
         lines.append(f"    Керамзитное основание: {k['keramzit_work_rate']}₽/м² = {k['keramzit_work_cost']:,}₽")
+    if m:
+        lines.append(f"    Укладка мет. сетки: {m['mesh_work_rate']}₽/м² × {m['work_m2']}м² = {m['mesh_work_cost']:,}₽")
     lines.append(f"    Стяжка ({w['floor_label']}): {w['rate']} = <b>{w['cost']:,}₽</b>")
 
     lines.append("")

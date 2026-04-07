@@ -15,11 +15,12 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from parser import process_measurement, get_distance_km, parse_passport_photo, parse_passport_text, parse_kp_photo
+from parser import process_measurement, get_distance_km, parse_passport_photo, parse_passport_text, parse_kp_photo, parse_requisites, get_director_genitive
 from database import init_db, save_measurement, update_measurement_status, close_db
 from calculator import calculate_estimate, format_estimate, MATERIALS_BASE_LAT, MATERIALS_BASE_LON
 from kp_generator import generate_kp
 from contract_generator import generate_contract
+from contract_generator_legal import generate_legal_contract
 from amo_crm import format_pipelines, format_custom_fields, fill_amo_lead, upload_file_to_lead, get_lead_by_id
 from kronos import create_event, bind_lead, SURVEYORS, find_surveyor_id
 
@@ -122,6 +123,9 @@ def format_parsed_result(data: dict, db_id: int = None, created_at=None) -> str:
     if data.get("keramzit"):
         k = data["keramzit"]
         lines.append(f"🟤 Керамзит: {k.get('area_m2', '?')} м², слой {k.get('thickness_mm', '?')} мм")
+    if data.get("mesh"):
+        m = data["mesh"]
+        lines.append(f"🔲 Сетка + арм.плёнка: материал {m.get('material_m2', '?')} м², работа {m.get('work_m2', '?')} м²")
     if data.get("location_type"):
         lines.append(f"📍 Локация: {data['location_type']}")
     if data.get("floor"):
@@ -283,6 +287,8 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
         price_modifier=st.get("modifier", 0),
         sand_transport=st.get("sand_transport"),
         payment_type=st.get("payment", ""),
+        mesh_material_m2=st.get("mesh_material", 0),
+        mesh_work_m2=st.get("mesh_work", 0),
     )
     st["estimate"] = estimate
 
@@ -476,6 +482,8 @@ async def handle_photo(message: Message):
                 "floor": parsed.get("floor", 1),
                 "keramzit_area": 0,
                 "keramzit_thick": 0,
+                "mesh_material": 0,
+                "mesh_work": 0,
                 "sand_transport": None,
                 "amo_lead_id": lead_id,
                 "amo_lead_data": amo_data,
@@ -576,6 +584,8 @@ async def handle_text(message: Message):
                 price_modifier=st.get("modifier", 0),
                 sand_transport=st.get("sand_transport"),
                 payment_type=st.get("payment", ""),
+                mesh_material_m2=st.get("mesh_material", 0),
+                mesh_work_m2=st.get("mesh_work", 0),
             )
             st["estimate"] = estimate
 
@@ -686,6 +696,12 @@ async def handle_text(message: Message):
     # Ждём дату/время для Кроноса?
     if st and st.get("kronos_step") == "datetime":
         handled = await handle_kronos_datetime(message, st)
+        if handled:
+            return
+
+    # Ждём ввод данных для договора ЮЛ (безнал)?
+    if st and st.get("legal_contract_step", -1) >= 0:
+        handled = await handle_legal_contract_input(message, st)
         if handled:
             return
 
@@ -852,6 +868,11 @@ async def on_confirm(callback: CallbackQuery):
     keramzit_data = parsed.get("keramzit") or {}
     st["keramzit_area"] = keramzit_data.get("area_m2", 0) or 0
     st["keramzit_thick"] = keramzit_data.get("thickness_mm", 0) or 0
+
+    # Сетка + арм. плёнка (без керамзита)
+    mesh_data = parsed.get("mesh") or {}
+    st["mesh_material"] = mesh_data.get("material_m2", 0) or 0
+    st["mesh_work"] = mesh_data.get("work_m2", 0) or 0
 
     # Спецтранспорт для песка
     st["sand_transport"] = parsed.get("sand_transport")
@@ -1460,14 +1481,20 @@ async def on_start_contract(callback: CallbackQuery):
         await callback.answer("Сначала рассчитай смету.")
         return
 
-    # Безнал — договор для юрлиц в разработке
+    # Безнал — договор для юрлиц
     if st.get("payment") == "безналичный расчет":
-        await callback.answer("🔧 В разработке")
+        st["legal_contract_step"] = 0
+        st["legal_contract_data"] = {}
         await callback.message.answer(
-            "🔧 <b>Договор для безналичного расчёта находится в разработке.</b>\n"
-            "Заказчик — юрлицо, шаблон договора будет добавлен позже.",
+            "📋 <b>Договор для юрлица (безнал)</b>\n\n"
+            "📝 Скопируй <b>реквизиты заказчика</b> из карточки и отправь одним сообщением.\n"
+            "Нужно: название организации, ФИО директора, ИНН, КПП, ОГРН, юр.адрес, р/с, банк, БИК, к/с.",
             parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
+            ]),
         )
+        await callback.answer("Заполняем договор ЮЛ")
         return
 
     st["contract_step"] = 0
@@ -1856,13 +1883,277 @@ async def on_restart_contract(callback: CallbackQuery):
     await callback.answer()
 
 
+# --- Договор ЮЛ: обработка ввода ---
+
+LEGAL_CONTRACT_STEPS = [
+    "requisites",       # 0: реквизиты (текст)
+    "email",            # 1: email (если не найден)
+    "contract_number",  # 2: номер договора
+    "work_start",       # 3: дата начала
+    "work_end",         # 4: дата окончания
+    "payment_terms",    # 5: условия оплаты
+]
+
+LEGAL_STEP_PROMPTS = {
+    "email": "📧 Введи <b>email заказчика</b> (обязательно, для пункта 2.2.2 договора):",
+    "contract_number": "📄 Введи <b>номер договора</b> (только число, например: 15):",
+    "work_start": "🏗 Введи <b>дату начала работ</b> (ДД.ММ.ГГГГ):",
+    "work_end": "🏗 Введи <b>дату окончания работ</b> (ДД.ММ.ГГГГ):",
+    "payment_terms": "💰 Введи <b>условия оплаты</b> (свободный текст, например: «100% предоплата 150000»):",
+}
+
+
+async def handle_legal_contract_input(message: Message, st: dict) -> bool:
+    """Обрабатывает ввод данных для договора ЮЛ."""
+    step_idx = st.get("legal_contract_step", -1)
+    if step_idx < 0 or step_idx >= len(LEGAL_CONTRACT_STEPS):
+        return False
+
+    step = LEGAL_CONTRACT_STEPS[step_idx]
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Введи данные текстом.")
+        return True
+
+    lcd = st.setdefault("legal_contract_data", {})
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_contract")]
+    ])
+
+    # === Шаг 0: Реквизиты ===
+    if step == "requisites":
+        processing = await message.answer("⏳ Распознаю реквизиты...")
+
+        req = await parse_requisites(text)
+        if req.get("error"):
+            await processing.edit_text("❌ Не удалось распознать реквизиты. Попробуй ещё раз.")
+            return True
+
+        lcd["requisites_raw"] = req
+
+        # Склоняем ФИО директора в родительный падеж
+        director_name = req.get("director_name") or ""
+        director_title = req.get("director_title") or "Директор"
+
+        if director_name:
+            genitive = await get_director_genitive(director_name, director_title)
+            lcd["director_name_genitive"] = genitive.get("name_genitive", director_name)
+            lcd["director_title_genitive"] = genitive.get("title_genitive", director_title + "а")
+        else:
+            lcd["director_name_genitive"] = "___"
+            lcd["director_title_genitive"] = "Директора"
+
+        # Формируем короткое имя: Назаров Д.А.
+        if director_name:
+            parts = director_name.split()
+            if len(parts) >= 3:
+                lcd["director_name_short"] = f"{parts[0]} {parts[1][0]}.{parts[2][0]}."
+            elif len(parts) == 2:
+                lcd["director_name_short"] = f"{parts[0]} {parts[1][0]}."
+            else:
+                lcd["director_name_short"] = director_name
+        else:
+            lcd["director_name_short"] = "___"
+
+        # Показываем результат
+        summary = (
+            "✅ <b>Реквизиты распознаны:</b>\n\n"
+            f"🏢 {req.get('org_name', '—')}\n"
+            f"👤 {director_title} {director_name}\n"
+            f"   → в род. падеже: {lcd['director_title_genitive']} {lcd['director_name_genitive']}\n"
+            f"📍 {req.get('legal_address', '—')}\n"
+            f"🔢 ИНН: {req.get('inn', '—')}"
+        )
+        if req.get("kpp"):
+            summary += f" | КПП: {req['kpp']}"
+        if req.get("ogrn"):
+            summary += f"\n📋 ОГРН: {req['ogrn']}"
+        summary += f"\n🏦 {req.get('bank_name', '—')}"
+        summary += f"\n💳 р/с: {req.get('bank_account', '—')}"
+        if req.get("bik"):
+            summary += f" | БИК: {req['bik']}"
+        if req.get("email"):
+            summary += f"\n📧 {req['email']}"
+            lcd["email"] = req["email"]
+
+        await processing.edit_text(summary, parse_mode=ParseMode.HTML)
+
+        # Если email найден — пропускаем шаг email
+        if req.get("email"):
+            st["legal_contract_step"] = 2  # contract_number
+        else:
+            st["legal_contract_step"] = 1  # email (обязательно!)
+
+        next_step = LEGAL_CONTRACT_STEPS[st["legal_contract_step"]]
+        await message.answer(LEGAL_STEP_PROMPTS[next_step], parse_mode=ParseMode.HTML, reply_markup=cancel_kb)
+        return True
+
+    # === Шаг 1: Email ===
+    if step == "email":
+        if "@" not in text:
+            await message.answer("❌ Это не похоже на email. Введи email заказчика:")
+            return True
+        lcd["email"] = text
+        st["legal_contract_step"] = 2
+        await message.answer(LEGAL_STEP_PROMPTS["contract_number"], parse_mode=ParseMode.HTML, reply_markup=cancel_kb)
+        return True
+
+    # === Шаги 2-5: текстовые поля ===
+    step_key_map = {
+        "contract_number": "contract_number",
+        "work_start": "work_start",
+        "work_end": "work_end",
+        "payment_terms": "payment_terms",
+    }
+
+    if step in step_key_map:
+        lcd[step_key_map[step]] = text
+
+        next_idx = step_idx + 1
+        if next_idx < len(LEGAL_CONTRACT_STEPS):
+            st["legal_contract_step"] = next_idx
+            next_step = LEGAL_CONTRACT_STEPS[next_idx]
+            await message.answer(LEGAL_STEP_PROMPTS[next_step], parse_mode=ParseMode.HTML, reply_markup=cancel_kb)
+            return True
+
+        # Все данные собраны → подтверждение
+        st["legal_contract_step"] = -1
+        req = lcd.get("requisites_raw", {})
+
+        summary = (
+            "📋 <b>Данные для договора ЮЛ:</b>\n\n"
+            f"🏢 {req.get('org_name', '—')}\n"
+            f"👤 {lcd.get('director_title_genitive', '—')} {lcd.get('director_name_genitive', '—')}\n"
+            f"📧 {lcd.get('email', '—')}\n"
+            f"📄 Договор №: {lcd.get('contract_number', '—')}\n"
+            f"🏗 Начало: {lcd.get('work_start', '—')}\n"
+            f"🏗 Окончание: {lcd.get('work_end', '—')}\n"
+            f"💰 Оплата: {lcd.get('payment_terms', '—')}\n"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Всё верно → Договор", callback_data="confirm_legal_contract"),
+                InlineKeyboardButton(text="🔄 Заново", callback_data="restart_legal_contract"),
+            ]
+        ])
+
+        await message.answer(summary, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return True
+
+    return False
+
+
+@dp.callback_query(F.data == "confirm_legal_contract")
+async def on_confirm_legal_contract(callback: CallbackQuery):
+    """Генерирует договор ЮЛ."""
+    st = user_state.get(callback.from_user.id)
+    if not st or not st.get("legal_contract_data"):
+        await callback.answer("Данные не найдены. Начни заново.")
+        return
+
+    await callback.answer("⏳ Генерирую договор ЮЛ...")
+
+    parsed = st["parsed"]
+    estimate = st["estimate"]
+    lcd = st["legal_contract_data"]
+    req = lcd.get("requisites_raw", {})
+
+    client_data = {
+        "org_name": req.get("org_name", "___"),
+        "director_title": lcd.get("director_title_genitive", "Директора"),
+        "director_name_genitive": lcd.get("director_name_genitive", "___"),
+        "director_name_short": lcd.get("director_name_short", "___"),
+        "director_basis": req.get("director_basis", "Устава"),
+        "email": lcd.get("email", "___"),
+        "legal_address": req.get("legal_address", "___"),
+        "inn": req.get("inn", "___"),
+        "kpp": req.get("kpp", "___"),
+        "ogrn": req.get("ogrn", "___"),
+        "bank_account": req.get("bank_account", "___"),
+        "bank_name": req.get("bank_name", "___"),
+        "corr_account": req.get("corr_account", "___"),
+        "bik": req.get("bik", "___"),
+        "contract_number": lcd.get("contract_number", "___"),
+        "work_start_date": lcd.get("work_start", "___"),
+        "work_end_date": lcd.get("work_end", "___"),
+        "payment_terms": lcd.get("payment_terms", "___"),
+    }
+
+    try:
+        from datetime import datetime, timezone, timedelta
+        msk = timezone(timedelta(hours=3))
+        ts = datetime.now(msk).strftime("%H%M%S")
+
+        org_short = req.get("org_name", "ЮЛ")
+        if "«" in org_short:
+            org_short = org_short.split("«")[1].split("»")[0]
+        else:
+            org_short = org_short[:20]
+
+        output_path = f"/tmp/Договор_ЮЛ_{lcd.get('contract_number', '0')}_{org_short}_{ts}.docx"
+
+        generate_legal_contract(
+            parsed=parsed,
+            estimate=estimate,
+            client_data=client_data,
+            grade=st.get("grade", "М150"),
+            include_sand_removal=st.get("sand_removal", False),
+            output_path=output_path,
+        )
+
+        st["contract_path"] = output_path
+        doc_file = FSInputFile(
+            output_path,
+            filename=f"Договор_ЮЛ_{lcd.get('contract_number', '')}_{org_short}.docx"
+        )
+        await callback.message.answer_document(
+            doc_file,
+            caption=f"📋 Договор ЮЛ №{lcd.get('contract_number', '')} — {req.get('org_name', '')}"
+        )
+
+        # Если есть привязка к АМО — предлагаем отправить
+        if st.get("amo_lead_id"):
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Отправить договор в АМО", callback_data="send_contract_to_amo")]
+            ])
+            await callback.message.answer(
+                "Договор ЮЛ готов! Отправить в сделку АМО?",
+                reply_markup=kb,
+            )
+
+    except Exception as e:
+        logger.error("Ошибка генерации договора ЮЛ: %s", e, exc_info=True)
+        await callback.message.answer("❌ Ошибка генерации договора ЮЛ. Попробуй ещё раз.")
+
+
+@dp.callback_query(F.data == "restart_legal_contract")
+async def on_restart_legal_contract(callback: CallbackQuery):
+    """Начинает сбор данных ЮЛ заново."""
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+
+    st["legal_contract_step"] = 0
+    st["legal_contract_data"] = {}
+
+    await callback.message.answer(
+        "📝 Скопируй <b>реквизиты заказчика</b> из карточки и отправь одним сообщением.",
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "cancel_contract")
 async def on_cancel_contract(callback: CallbackQuery):
-    """Отменяет создание договора."""
+    """Отменяет создание договора (физлицо или юрлицо)."""
     st = user_state.get(callback.from_user.id)
     if st:
         st["contract_step"] = -1
+        st["legal_contract_step"] = -1
         st.pop("contract_data", None)
+        st.pop("legal_contract_data", None)
     await callback.message.answer("❌ Создание договора отменено.")
     await callback.answer()
 

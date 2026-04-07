@@ -197,6 +197,7 @@ def generate_kp(
     eq = estimate["equipment_delivery"]
     w = estimate["work"]
     k = estimate.get("keramzit")
+    m = estimate.get("mesh")
     volume = round(area * thickness / 1000, 3)
 
     table = doc.add_table(rows=0, cols=5)
@@ -306,6 +307,24 @@ def generate_kp(
             (f"{k['mesh_cost']}", False, R),
         ])
 
+    # Сетка + арм.плёнка (без керамзита, если есть)
+    if m:
+        _add_row(table, [
+            ("Армированная пленка 100г/м", False, L),
+            ("м2", False, C),
+            (f"{m['reinforced_film_m2']}", False, R),
+            ("40", False, R),
+            (f"{m['reinforced_film_cost']}", False, R),
+        ])
+
+        _add_row(table, [
+            ("Металлическая сетка", False, L),
+            ("м2", False, C),
+            (f"{m['mesh_m2']}", False, R),
+            ("120", False, R),
+            (f"{m['mesh_cost']}", False, R),
+        ])
+
     # Доставка материалов
     _add_row(table, [
         ("Доставка материалов", False, L),
@@ -353,6 +372,16 @@ def generate_kp(
             (f"{ker_area}", False, R),
             (f"{k['keramzit_work_rate']}", False, R),
             (f"{k['keramzit_work_cost']}", False, R),
+        ])
+
+    # Работа: укладка мет. сетки (если есть)
+    if m:
+        _add_row(table, [
+            ("Укладка мет. сетки", False, L),
+            ("м2", False, C),
+            (f"{m['work_m2']}", False, R),
+            (f"{m['mesh_work_rate']}", False, R),
+            (f"{m['mesh_work_cost']}", False, R),
         ])
 
     # Устройство стяжки

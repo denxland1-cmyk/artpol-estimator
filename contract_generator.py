@@ -167,6 +167,7 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
     eq = estimate["equipment_delivery"]
     w = estimate["work"]
     k = estimate.get("keramzit")
+    m = estimate.get("mesh")
     volume = round(area * thickness / 1000, 3)
 
     ker_data = parsed.get("keramzit") or {}
@@ -247,6 +248,15 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
                  (f"{k['mesh_m2']}", False, R), ("120", False, R),
                  (f"{k['mesh_cost']}", False, R)])
 
+    # Сетка + арм. плёнка (без керамзита)
+    if m:
+        add_row([("Армированная пленка 100г/м", False, L), ("м2", False, C),
+                 (f"{m['reinforced_film_m2']}", False, R), ("40", False, R),
+                 (f"{m['reinforced_film_cost']}", False, R)])
+        add_row([("Металлическая сетка", False, L), ("м2", False, C),
+                 (f"{m['mesh_m2']}", False, R), ("120", False, R),
+                 (f"{m['mesh_cost']}", False, R)])
+
     # Доставка материалов
     add_row([("Доставка материалов", False, L), ("рейс", False, C),
              ("1", False, R), (f"{c['delivery']}", False, R), (f"{c['delivery']}", False, R)])
@@ -269,6 +279,12 @@ def _insert_estimate_table(doc, parsed, estimate, area, thickness, grade, includ
         add_row([("Устройство керамзитного основания", False, L), ("м2", False, C),
                  (f"{ker_area}", False, R), (f"{k['keramzit_work_rate']}", False, R),
                  (f"{k['keramzit_work_cost']}", False, R)])
+
+    # Работа укладка сетки
+    if m:
+        add_row([("Укладка мет. сетки", False, L), ("м2", False, C),
+                 (f"{m['work_m2']}", False, R), (f"{m['mesh_work_rate']}", False, R),
+                 (f"{m['mesh_work_cost']}", False, R)])
 
     # Работа стяжка
     work_rate = w.get("rate", "").replace("₽", "")
