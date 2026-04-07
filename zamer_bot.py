@@ -35,6 +35,8 @@ STEPS = [
     "object_type",      # 2  кнопки
     "city_or_oblast",   # 3  кнопки
     "address",          # 4
+    "entrance",         # 4a (только для квартир)
+    "apartment_num",    # 4b (только для квартир)
     "coordinates",      # 5
     "floor",            # 6
     "area",             # 7
@@ -57,8 +59,10 @@ PROMPTS = {
     "client_phone":   "📞 <b>Шаг 2/16</b>\nВведи <b>телефон заказчика</b>:",
     "object_type":    "🏠 <b>Шаг 3/16</b>\nТип объекта:",
     "city_or_oblast": "📍 <b>Шаг 4/16</b>\nГород или за городом:",
-    "address":        "🏘 <b>Шаг 5/16</b>\nВведи <b>адрес объекта</b>:\n(населённый пункт, улица, дом)",
-    "coordinates":    "🗺 <b>Шаг 6/16</b>\nВведи <b>координаты объекта</b>:\n(скопируй из Яндекс.Карт, например: 56.310043, 43.953282)",
+    "address":        "🏘 <b>Шаг 5/18</b>\nВведи <b>адрес объекта</b>:\n(населённый пункт, улица, дом)",
+    "entrance":       "🚪 <b>Шаг 5.1/18</b>\nВведи <b>номер подъезда</b>:",
+    "apartment_num":  "🏠 <b>Шаг 5.2/18</b>\nВведи <b>номер квартиры</b>:",
+    "coordinates":    "🗺 <b>Шаг 6/18</b>\nВведи <b>координаты объекта</b>:\n(скопируй из Яндекс.Карт, например: 56.310043, 43.953282)",
     "floor":          "🏢 <b>Шаг 7/16</b>\nВведи <b>этаж</b>:\n(число)",
     "area":           "📐 <b>Шаг 8/16</b>\nВведи <b>площадь</b> (м²):\n(число, например: 63 или 63.5)",
     "thickness":      "📏 <b>Шаг 9/16</b>\nВведи <b>средний слой</b> (мм):\n(число, например: 90 или 90.5)",
@@ -214,6 +218,16 @@ def next_step(st: dict) -> str:
         "keramzit",
     ]
 
+    # Квартира: после адреса → подъезд → номер квартиры → координаты
+    if current == "address":
+        if data.get("object_type") == "квартира":
+            return "entrance"
+        return "coordinates"
+    if current == "entrance":
+        return "apartment_num"
+    if current == "apartment_num":
+        return "coordinates"
+
     # Керамзит: да → площадь + толщина, нет → пропускаем
     if current == "keramzit":
         if data.get("keramzit") == "yes":
@@ -262,7 +276,10 @@ def format_result(data: dict) -> str:
     floor = data.get("floor", "")
     lines.append(f"{obj}, {loc}, {floor} этаж")
 
-    lines.append(data.get("address", ""))
+    addr = data.get("address", "")
+    if data.get("object_type") == "квартира" and data.get("entrance") and data.get("apartment_num"):
+        addr += f", подъезд {data['entrance']}, кв. {data['apartment_num']}"
+    lines.append(addr)
     lines.append(f"Координаты: {data.get('coordinates', '')}")
 
     lines.append(f"{data.get('area', '')}м2 {data.get('thickness', '')}мм")
@@ -447,6 +464,20 @@ async def on_text(message: Message):
 
     elif step == "address":
         st["data"]["address"] = text
+
+    elif step == "entrance":
+        val = validate_int(text)
+        if val is None or val <= 0:
+            await message.answer("❌ Введи номер подъезда (число):")
+            return
+        st["data"]["entrance"] = val
+
+    elif step == "apartment_num":
+        val = validate_int(text)
+        if val is None or val <= 0:
+            await message.answer("❌ Введи номер квартиры (число):")
+            return
+        st["data"]["apartment_num"] = val
 
     elif step == "coordinates":
         coords = validate_coordinates(text)
