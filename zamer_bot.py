@@ -96,7 +96,9 @@ SURVEYORS = {
     # Володя: добавь его Telegram ID когда будет известен
 }
 
-COUNTERS_FILE = Path(__file__).parent / "counters.json"
+# Путь к счётчикам: Railway Volume (/data) или рядом с ботом
+COUNTERS_DIR = Path(os.environ.get("COUNTERS_DIR", str(Path(__file__).parent)))
+COUNTERS_FILE = COUNTERS_DIR / "counters.json"
 
 def load_counters() -> dict:
     """Загружает счётчики из JSON-файла."""
