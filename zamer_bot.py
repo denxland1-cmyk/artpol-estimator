@@ -6,8 +6,11 @@ ARTPOL — Бот-замерщик (@artpol_zamer_bot)
 
 import os
 import re
+import json
 import logging
 import asyncio
+from datetime import datetime
+from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -80,6 +83,84 @@ PROMPTS = {
 
 # Хранилище состояний {user_id: {"step": str, "data": dict}}
 user_state = {}
+
+# ============================================================
+# НУМЕРАЦИЯ ЗАМЕРОВ
+# ============================================================
+
+# Замерщики: Telegram user_id → короткое имя
+# ⚠️ ВСТАВЬ РЕАЛЬНЫЕ Telegram ID замерщиков
+SURVEYORS = {
+    1912847671: "Дима",
+    1331894090: "Кирилл",
+    # Володя: добавь его Telegram ID когда будет известен
+}
+
+COUNTERS_FILE = Path(__file__).parent / "counters.json"
+
+def load_counters() -> dict:
+    """Загружает счётчики из JSON-файла."""
+    if COUNTERS_FILE.exists():
+        try:
+            with open(COUNTERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            logger.error("Ошибка чтения counters.json, создаю заново")
+    # Начальные значения
+    return {
+        "global_next": 28,
+        "global_year": 2025,
+        "surveyors": {
+            "Дима":    {"next": 7,  "month": 4, "year": 2025},
+            "Володя":  {"next": 15, "month": 4, "year": 2025},
+            "Кирилл":  {"next": 8,  "month": 4, "year": 2025},
+        }
+    }
+
+def save_counters(counters: dict):
+    """Сохраняет счётчики в JSON-файл."""
+    with open(COUNTERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(counters, f, ensure_ascii=False, indent=2)
+
+def get_next_numbers(surveyor_name: str) -> tuple[int, int]:
+    """
+    Возвращает (общий_номер, личный_номер) и увеличивает счётчики.
+    Общий — сбрасывается 1 января.
+    Личный — сбрасывается 1-го числа каждого месяца.
+    """
+    counters = load_counters()
+    now = datetime.now()
+
+    # Сброс общего счётчика на новый год
+    if counters.get("global_year", now.year) < now.year:
+        counters["global_next"] = 1
+        counters["global_year"] = now.year
+
+    global_num = counters["global_next"]
+    counters["global_next"] = global_num + 1
+    counters["global_year"] = now.year
+
+    # Личный счётчик замерщика
+    if surveyor_name not in counters["surveyors"]:
+        counters["surveyors"][surveyor_name] = {
+            "next": 1, "month": now.month, "year": now.year
+        }
+
+    sv = counters["surveyors"][surveyor_name]
+
+    # Сброс личного счётчика на новый месяц
+    if sv.get("year", now.year) < now.year or sv.get("month", now.month) < now.month:
+        sv["next"] = 1
+        sv["month"] = now.month
+        sv["year"] = now.year
+
+    personal_num = sv["next"]
+    sv["next"] = personal_num + 1
+    sv["month"] = now.month
+    sv["year"] = now.year
+
+    save_counters(counters)
+    return global_num, personal_num
 
 # ============================================================
 # КЛАВИАТУРЫ
@@ -265,9 +346,17 @@ def next_step(st: dict) -> str:
     return "confirm"
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict, global_num: int = None, personal_num: int = None,
+                   surveyor_name: str = None) -> str:
     """Формирует готовое сообщение замера для группы."""
     lines = []
+
+    # Нумерация
+    if global_num is not None:
+        num_line = f"Замер №{global_num}"
+        if surveyor_name and personal_num is not None:
+            num_line += f" ({surveyor_name} №{personal_num})"
+        lines.append(num_line)
 
     lines.append(f"{data.get('client_name', '')} {data.get('client_phone', '')}")
 
@@ -413,11 +502,16 @@ async def on_sand(callback: CallbackQuery):
 async def on_send(callback: CallbackQuery):
     st = get_state(callback.from_user.id)
     data = st["data"]
-    result = format_result(data)
+
+    # Определяем замерщика и присваиваем номера
+    user_id = callback.from_user.id
+    surveyor_name = SURVEYORS.get(user_id, "Володя")
+    global_num, personal_num = get_next_numbers(surveyor_name)
+
+    result = format_result(data, global_num, personal_num, surveyor_name)
 
     if GROUP_CHAT_ID:
-        surveyor = callback.from_user.full_name or "Замерщик"
-        group_msg = f"📋 <b>Новый замер от {surveyor}</b>\n\n{result}"
+        group_msg = f"📋 <b>Новый замер от {surveyor_name}</b>\n\n{result}"
         try:
             await bot.send_message(GROUP_CHAT_ID, group_msg)
             await callback.message.answer("✅ <b>Замер отправлен в группу!</b>\n\nНажми /start для нового замера.")
