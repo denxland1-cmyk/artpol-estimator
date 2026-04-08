@@ -195,6 +195,7 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
     modifier = st.get("modifier", 0)
     payment = st.get("payment", "")
     sand = st.get("sand_removal", False)
+    customer_material = st.get("customer_material", False)
 
     rows = []
 
@@ -234,12 +235,14 @@ def get_estimate_keyboard(st: dict) -> InlineKeyboardMarkup:
     if modifier != 0:
         rows.append([InlineKeyboardButton(text="↩️ Сбросить скидку/наценку", callback_data="mod_0")])
 
-    # Нал / Безнал
+    # Нал / Безнал / Материал заказчика
     cash_txt = "🟢 Нал ✓" if payment == "наличными" else "Нал"
     bank_txt = "🟢 Безнал ✓" if payment == "безналичный расчет" else "Безнал"
+    mat_txt = "🟠 Мат. заказч. ✓" if customer_material else "Мат. заказч."
     rows.append([
         InlineKeyboardButton(text=cash_txt, callback_data="pay_cash"),
         InlineKeyboardButton(text=bank_txt, callback_data="pay_bank"),
+        InlineKeyboardButton(text=mat_txt, callback_data="customer_mat_toggle"),
     ])
 
     # Вывоз песка
@@ -289,6 +292,7 @@ async def recalc_and_show(callback: CallbackQuery, st: dict):
         payment_type=st.get("payment", ""),
         mesh_material_m2=st.get("mesh_material", 0),
         mesh_work_m2=st.get("mesh_work", 0),
+        customer_material=st.get("customer_material", False),
     )
     st["estimate"] = estimate
 
@@ -586,6 +590,7 @@ async def handle_text(message: Message):
                 payment_type=st.get("payment", ""),
                 mesh_material_m2=st.get("mesh_material", 0),
                 mesh_work_m2=st.get("mesh_work", 0),
+                customer_material=st.get("customer_material", False),
             )
             st["estimate"] = estimate
 
@@ -949,6 +954,20 @@ async def on_payment(callback: CallbackQuery):
     # Пересчитываем смету (безнал меняет цены)
     await recalc_and_show(callback, st)
     await callback.answer(f"Оплата: {st['payment']}")
+
+
+# --- Материал заказчика ---
+@dp.callback_query(F.data == "customer_mat_toggle")
+async def on_customer_material(callback: CallbackQuery):
+    st = user_state.get(callback.from_user.id)
+    if not st:
+        await callback.answer("Отправь замер заново.")
+        return
+    st["customer_material"] = not st.get("customer_material", False)
+
+    await recalc_and_show(callback, st)
+    status = "ДА" if st["customer_material"] else "НЕТ"
+    await callback.answer(f"Материал заказчика: {status}")
 
 
 # --- Вывоз песка ---

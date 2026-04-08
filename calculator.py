@@ -504,6 +504,7 @@ def calculate_estimate(
     payment_type: str = "",
     mesh_material_m2: float = 0,
     mesh_work_m2: float = 0,
+    customer_material: bool = False,
 ) -> dict:
     """
     Полный расчёт сметы.
@@ -677,6 +678,16 @@ def calculate_estimate(
             mesh_data["mesh_work_cost"] = round(mesh_data["mesh_work_cost"] * 1.5)
             mesh_data["mesh_work_rate"] = round(mesh_data["mesh_work_rate"] * 1.5)
 
+    # Материал заказчика — убираем песок, цемент и доставку цемента
+    if customer_material:
+        sand["sand_cost"] = 0
+        sand["delivery"] = 0
+        sand["extra"] = 0
+        sand["total"] = 0
+        cement["cement_cost"] = 0
+        cement["delivery"] = 0
+        cement["total"] = 0
+
     # Итого материалы
     materials_total = (
         sand["total"]
@@ -718,6 +729,7 @@ def calculate_estimate(
         "mesh": mesh_data,
         "price_modifier": price_modifier,
         "payment_type": payment_type,
+        "customer_material": customer_material,
         "materials_total": round(materials_total),
         "grand_total": round(grand_total),
     }
@@ -755,18 +767,29 @@ def format_estimate(est: dict) -> str:
     k = est.get("keramzit")
     m = est.get("mesh")
 
+    is_customer_mat = est.get("customer_material", False)
+
     lines = [
         "💰 <b>СМЕТА:</b>",
         "",
         "📦 <b>Материалы:</b>",
-        f"🪨 Песок: {s['sand_tons']}т ({s['transport']})",
-        f"    Песок: {s['sand_cost']:,}₽ + доставка: {s['delivery']:,}₽ + {s['extra']:,}₽",
-        f"    Итого: <b>{s['total']:,}₽</b>",
-        f"🧱 Цемент {c['grade']}: {c['bags']} мешков = {c['cement_cost']:,}₽",
+    ]
+
+    if is_customer_mat:
+        lines.append(f"🟠 Песок и цемент: <b>МАТЕРИАЛ ЗАКАЗЧИКА</b>")
+    else:
+        lines.extend([
+            f"🪨 Песок: {s['sand_tons']}т ({s['transport']})",
+            f"    Песок: {s['sand_cost']:,}₽ + доставка: {s['delivery']:,}₽ + {s['extra']:,}₽",
+            f"    Итого: <b>{s['total']:,}₽</b>",
+            f"🧱 Цемент {c['grade']}: {c['bags']} мешков = {c['cement_cost']:,}₽",
+        ])
+
+    lines.extend([
         f"🧵 Фибра: {f['kg']}кг = {f['cost']:,}₽",
         f"📄 Плёнка техн.: {fl['m2']}м² = {fl['cost']:,}₽",
         f"🔇 Izoflex: {iz['meters']}м = {iz['cost']:,}₽",
-    ]
+    ])
 
     if k:
         lines.append(f"🟤 Керамзит: {k['keramzit_bags']} мешков × 340₽ = {k['keramzit_cost']:,}₽")
@@ -777,7 +800,8 @@ def format_estimate(est: dict) -> str:
         lines.append(f"🔲 Арм. плёнка: {m['reinforced_film_m2']}м² = {m['reinforced_film_cost']:,}₽")
         lines.append(f"🔲 Мет. сетка: {m['mesh_m2']}м² = {m['mesh_cost']:,}₽")
 
-    lines.append(f"🚛 Доставка материалов: {c['delivery']:,}₽")
+    if not is_customer_mat:
+        lines.append(f"🚛 Доставка материалов: {c['delivery']:,}₽")
     lines.append(f"🚛 Доставка оборуд.: {eq['cost']:,}₽ ({eq['detail']})")
 
     lines.append("")
