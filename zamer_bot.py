@@ -14,7 +14,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    BotCommand,
+    BotCommand, InputMediaPhoto,
 )
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -54,7 +54,8 @@ STEPS = [
     "sand_removal",     # 16 кнопки
     "extra_work",       # 17 текст / пропустить
     "deadline",         # 18 текст / пропустить
-    "confirm",          # 19 подтверждение
+    "photos",           # 19 фото (необязательно, сколько угодно)
+    "confirm",          # 20 подтверждение
 ]
 
 PROMPTS = {
@@ -79,6 +80,7 @@ PROMPTS = {
     "sand_removal":   "🚛 <b>Шаг 13/16</b>\nВывоз остатков песка:",
     "extra_work":     "🔧 <b>Шаг 14/16</b>\nДоп. работы:\n(уборка от заказчика, запенивание дыр, уборка от нас и т.д.)\nИли нажми <b>Пропустить</b>",
     "deadline":       "📅 <b>Шаг 15/16</b>\nСроки (примерно):\nИли нажми <b>Пропустить</b>",
+    "photos":         "📸 <b>Шаг 16/16</b>\nОтправь <b>фото объекта</b> (сколько угодно).\nКогда закончишь — нажми <b>Готово</b>.\nИли нажми <b>Пропустить</b> если фото нет.",
 }
 
 # Хранилище состояний {user_id: {"step": str, "data": dict}}
@@ -212,6 +214,12 @@ def kb_confirm():
          InlineKeyboardButton(text="🔄 Заново", callback_data="restart")],
     ])
 
+def kb_photos():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готово", callback_data="photos_done"),
+         InlineKeyboardButton(text="⏭ Пропустить", callback_data="skip")],
+    ])
+
 def kb_cancel():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
@@ -284,6 +292,8 @@ async def send_step(chat_id: int, step: str):
         await bot.send_message(chat_id, prompt, reply_markup=kb_yes_no("mesh"))
     elif step == "sand_removal":
         await bot.send_message(chat_id, prompt, reply_markup=kb_sand())
+    elif step == "photos":
+        await bot.send_message(chat_id, prompt, reply_markup=kb_photos())
     elif step in ("extra_work", "deadline"):
         await bot.send_message(chat_id, prompt, reply_markup=kb_skip())
     else:
@@ -338,6 +348,8 @@ def next_step(st: dict) -> str:
     if current == "extra_work":
         return "deadline"
     if current == "deadline":
+        return "photos"
+    if current == "photos":
         return "confirm"
 
     # Обычный порядок
@@ -500,6 +512,14 @@ async def on_sand(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "photos_done")
+async def on_photos_done(callback: CallbackQuery):
+    st = get_state(callback.from_user.id)
+    st["step"] = "confirm"
+    await show_confirm(callback.message.chat.id, st["data"])
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "send")
 async def on_send(callback: CallbackQuery):
     st = get_state(callback.from_user.id)
@@ -516,6 +536,16 @@ async def on_send(callback: CallbackQuery):
         group_msg = f"📋 <b>Новый замер от {surveyor_name}</b>\n\n{result}"
         try:
             await bot.send_message(GROUP_CHAT_ID, group_msg)
+
+            # Отправляем фото в группу
+            photos = data.get("photos", [])
+            if photos:
+                # Отправляем альбомом (до 10 фото за раз)
+                for i in range(0, len(photos), 10):
+                    batch = photos[i:i+10]
+                    media = [InputMediaPhoto(media=fid) for fid in batch]
+                    await bot.send_media_group(GROUP_CHAT_ID, media)
+
             await callback.message.answer("✅ <b>Замер отправлен в группу!</b>\n\nНажми /start для нового замера.")
         except Exception as e:
             logger.error("Ошибка отправки в группу: %s", e)
@@ -531,6 +561,26 @@ async def on_send(callback: CallbackQuery):
     await callback.answer()
 
 
+# --- Приём фото ---
+
+@dp.message(F.photo)
+async def on_photo(message: Message):
+    st = get_state(message.from_user.id)
+    if st["step"] != "photos":
+        await message.answer("📸 Фото можно отправить на шаге загрузки фото.")
+        return
+
+    # Сохраняем file_id самого большого размера
+    if "photos" not in st["data"]:
+        st["data"]["photos"] = []
+    st["data"]["photos"].append(message.photo[-1].file_id)
+    count = len(st["data"]["photos"])
+    await message.answer(
+        f"✅ Фото #{count} принято. Отправь ещё или нажми <b>Готово</b>.",
+        reply_markup=kb_photos()
+    )
+
+
 # --- Ввод текста ---
 
 @dp.message()
@@ -541,6 +591,10 @@ async def on_text(message: Message):
 
     if not text:
         await message.answer("❌ Введи данные текстом.")
+        return
+
+    if step == "photos":
+        await message.answer("📸 Отправь фото или нажми кнопку выше.", reply_markup=kb_photos())
         return
 
     if step == "confirm":
