@@ -106,14 +106,14 @@ def load_counters() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             logger.error("Ошибка чтения counters.json, создаю заново")
-    # Начальные значения
+    # Начальные значения (с учётом замера Димы №28/№7 от 08.04.2026)
     return {
-        "global_next": 28,
-        "global_year": 2025,
+        "global_next": 29,
+        "global_year": 2026,
         "surveyors": {
-            "Дима":    {"next": 7,  "month": 4, "year": 2025},
-            "Володя":  {"next": 15, "month": 4, "year": 2025},
-            "Кирилл":  {"next": 8,  "month": 4, "year": 2025},
+            "Дима":    {"next": 8,  "month": 4, "year": 2026},
+            "Володя":  {"next": 15, "month": 4, "year": 2026},
+            "Кирилл":  {"next": 8,  "month": 4, "year": 2026},
         }
     }
 
