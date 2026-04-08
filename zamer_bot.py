@@ -563,6 +563,21 @@ async def on_send(callback: CallbackQuery):
 
 # --- Приём фото ---
 
+# Таймеры для сбора альбомов {user_id: asyncio.Task}
+_photo_timers: dict[int, asyncio.Task] = {}
+
+async def _photo_batch_done(user_id: int, chat_id: int):
+    """Вызывается через 1.5 сек после последнего фото — показывает итог."""
+    await asyncio.sleep(1.5)
+    st = get_state(user_id)
+    count = len(st["data"].get("photos", []))
+    await bot.send_message(
+        chat_id,
+        f"✅ Принято фото: {count} шт.\nОтправь ещё или нажми <b>Готово</b>.",
+        reply_markup=kb_photos()
+    )
+    _photo_timers.pop(user_id, None)
+
 @dp.message(F.photo)
 async def on_photo(message: Message):
     st = get_state(message.from_user.id)
@@ -570,14 +585,18 @@ async def on_photo(message: Message):
         await message.answer("📸 Фото можно отправить на шаге загрузки фото.")
         return
 
+    user_id = message.from_user.id
+
     # Сохраняем file_id самого большого размера
     if "photos" not in st["data"]:
         st["data"]["photos"] = []
     st["data"]["photos"].append(message.photo[-1].file_id)
-    count = len(st["data"]["photos"])
-    await message.answer(
-        f"✅ Фото #{count} принято. Отправь ещё или нажми <b>Готово</b>.",
-        reply_markup=kb_photos()
+
+    # Сбрасываем таймер — ждём ещё фото из альбома
+    if user_id in _photo_timers:
+        _photo_timers[user_id].cancel()
+    _photo_timers[user_id] = asyncio.create_task(
+        _photo_batch_done(user_id, message.chat.id)
     )
 
 
