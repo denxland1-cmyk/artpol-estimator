@@ -622,6 +622,9 @@ async def on_text(message: Message):
 
     # Валидация по типу шага
     if step == "client_name":
+        if len(text) < 2:
+            await message.answer("❌ Введи имя заказчика (минимум 2 символа):")
+            return
         st["data"]["client_name"] = text
 
     elif step == "client_phone":
@@ -632,6 +635,9 @@ async def on_text(message: Message):
         st["data"]["client_phone"] = phone
 
     elif step == "address":
+        if len(text) < 5:
+            await message.answer("❌ Введи адрес объекта (населённый пункт, улица, дом):")
+            return
         st["data"]["address"] = text
 
     elif step == "entrance":
