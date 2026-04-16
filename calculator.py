@@ -265,7 +265,7 @@ def calc_cement(area_m2: float, thickness_mm: float, grade: str, is_city: bool, 
     241+: манипулятор 240 + остаток подходящей машиной
     """
     volume = area_m2 * thickness_mm
-    multiplier = 5 if grade == "М150" else 6
+    multiplier = 4.6 if grade == "М150" else 5.5
     bags = math.ceil(volume / 1000 * multiplier)
 
     cement_cost = bags * CEMENT_PRICE_PER_BAG
