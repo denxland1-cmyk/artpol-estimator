@@ -65,6 +65,7 @@ FIELD_SMETA_AREA_KERAMZIT = 663483   # Площадь керамзит (м2) —
 FIELD_SMETA_AREA_MESH = 663485       # Площадь сетка (м2) — numeric
 FIELD_SMETA_AREA_EPPS = 663487       # Площадь ЭППС (м2) — numeric
 FIELD_SMETA_AREA_SAND_BASE = 663489  # Площадь песчаное основание (м2) — text
+FIELD_SMETA_CUSTOMER_MATERIAL = 663677  # Материал заказчика — checkbox
 
 # Факт-поля (заполняются после выполнения работ, НЕ при создании сметы)
 FIELD_SMETA_FACT_DEL_MAT = 663459   # Факт доставка материала — numeric
@@ -531,6 +532,10 @@ def build_smeta_fields(
 
     # === Примечания — "без изменений" по умолчанию ===
     fields.append({"field_id": FIELD_SMETA_NOTES, "values": [{"value": "без изменений"}]})
+
+    # === Материал заказчика ===
+    is_customer_mat = estimate.get("customer_material", False)
+    fields.append({"field_id": FIELD_SMETA_CUSTOMER_MATERIAL, "values": [{"value": is_customer_mat}]})
 
     # === Тип оплаты ===
     if payment:
